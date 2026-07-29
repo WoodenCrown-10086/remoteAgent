@@ -8,6 +8,13 @@ const inputSchema = z.object({
     .describe(
       '要在沙箱中执行的 Shell 命令，例如 "node src/hello.ts" 或 "npm install"',
     ),
+  background: z
+    .boolean()
+    .optional()
+    .default(false)
+    .describe(
+      '设为 true 时命令在后台运行，立即返回（用于启动 Web 服务等长期运行的进程）',
+    ),
 });
 
 /**
@@ -17,15 +24,32 @@ const inputSchema = z.object({
 export function createExecuteCommandTool(sandbox: Sandbox) {
   return tool({
     description:
-      '在 e2b 云沙箱内执行 Shell 命令。用于运行代码、安装依赖或执行测试。',
+      '在 e2b 云沙箱内执行 Shell 命令。用于运行代码、安装依赖或执行测试。启动 Web 服务等长期运行的命令时，必须设置 background=true，避免超时。',
     inputSchema,
     execute: async (args) => {
-      const { command } = args;
+      const { command, background } = args;
 
       try {
-        // 使用 sandbox.commands.run() 在沙箱中安全执行
+        if (background) {
+          // 后台运行：不等待，立即返回
+          const handle = await sandbox.commands.run(command, {
+            background: true,
+            onStdout: (data) => console.log(`[e2b stdout] ${data}`),
+            onStderr: (data) => console.log(`[e2b stderr] ${data}`),
+          });
+          console.log(`[e2b 后台命令] ${command} (pid=${handle.pid})`);
+          return {
+            success: true,
+            stdout: `后台进程已启动 (pid=${handle.pid})`,
+            stderr: '(无错误)',
+            exitCode: 0,
+            message: `后台命令已启动 (pid=${handle.pid}): ${command}`,
+          };
+        }
+
+        // 同步执行：等待完成
         const result = await sandbox.commands.run(command, {
-          timeoutMs: 30_000, // 30 秒超时
+          timeoutMs: 30_000,
           onStdout: (data) => {
             console.log(`[e2b stdout] ${data}`);
           },

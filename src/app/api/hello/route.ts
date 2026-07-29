@@ -16,18 +16,21 @@ import {
   buildSkillPrompt,
 } from '@/agent/skills';
 
+export const dynamic = 'force-dynamic';
+
 const BASE_SYSTEM_PROMPT = `你是一个 Coding Agent，工作在 e2b 云沙箱中（根目录 /home/user/）。
 
 ## 核心原则
 - **严格聚焦用户任务**：只做用户明确要求的事，不要主动探索、分析或修改无关文件。
 - **不要跑题**：沙箱中可能存在其他项目的遗留文件，忽略它们。不要因为看到其他代码就转移注意力。
 - **简洁高效**：用最少的步骤完成任务，不要做多余的事。任务完成后直接总结，不要"顺便看看还有什么能做"。
+- **禁止在对话中粘贴代码**：不要把你的回复当作文件内容展示区。创建/修改文件时，只需说明文件路径和用途，不要复制粘贴文件内容到对话中。文件内容通过 write_file/edit_file 工具写入即可。
 
 ## 可用工具
 - write_file: 创建或覆盖文件
 - read_file: 读取指定文件内容（仅读你需要看的文件）
 - edit_file: 精准编辑文件中某一段（给定 old_string → new_string）
-- execute_command: 执行 Shell 命令，用于运行代码、安装依赖等
+- execute_command: 执行 Shell 命令。启动 Web 服务时必须传 background=true（如 {"command": "npx serve -p 3000", "background": true}），否则会超时。不要用 python3 -m http.server（单线程易阻塞）。
 - grep_search: 在代码库中搜索文本，快速定位
 - list_files: 列出目录结构（仅在必要时使用，不要随意浏览）
 - web_fetch: 查阅在线文档。⚠️ 只用文档站（nodejs.org、npmjs.com、mdn、github.com），不要用搜索引擎
@@ -35,11 +38,11 @@ const BASE_SYSTEM_PROMPT = `你是一个 Coding Agent，工作在 e2b 云沙箱�
 - read_skill: 加载开发规范 Skill。先看下方「可用 Skills」列表，选择相关的 skill 用此工具加载详细规范。
 
 ## 工作流程
-1. 理解用户任务的明确范围，只做该做的事。
+1. 理解用户任务，用一两句话说明你打算怎么做。
 2. 如果任务涉及特定技术栈，用 read_skill 加载对应规范。
 3. 写代码。小改动用 edit_file，新建文件用 write_file。
 4. 运行验证。报错则定位修复，直到通过。
-5. 总结：你创建/修改了哪些文件，运行结果。然后停止。
+5. 总结：你创建/修改了哪些文件，运行结果，服务访问地址。然后停止。
 
 ## 可用 Skills
 {SKILL_LIST}`;
@@ -101,6 +104,9 @@ export async function POST(req: Request) {
       };
 
       try {
+        // 立即发送注释行，刷新 HTTP 头 + 通知前端连接成功
+        controller.enqueue(encoder.encode(': connected\n\n'));
+
         // 初始元信息
         send({
           type: 'init',
@@ -114,14 +120,46 @@ export async function POST(req: Request) {
           system: systemPrompt,
           messages: [{ role: 'user', content: prompt }],
           tools,
-          stopWhen: stepCountIs(15),
+          stopWhen: stepCountIs(100),
         });
 
         for await (const part of result.stream) {
-            console.log(part.type)
+          console.log('[stream]', part.type);
           switch (part.type) {
+            case 'text-start':
+              // 文本段开始，不做特殊处理
+              break;
+
             case 'text-delta':
               send({ type: 'text', content: (part as any).text });
+              break;
+
+            case 'text-end':
+              // 文本段结束
+              break;
+
+            case 'reasoning-start':
+              send({ type: 'text', content: '🧠 ' });
+              break;
+
+            case 'reasoning-delta':
+              // DeepSeek 等模型可能把思考过程放在 reasoning 里，当作文本输出
+              send({ type: 'text', content: (part as any).text });
+              break;
+
+            case 'reasoning-end':
+              send({ type: 'text', content: '\n' });
+              break;
+
+            case 'tool-input-start':
+              // 工具参数流式构建开始
+              break;
+
+            case 'tool-input-delta':
+              // 工具参数的流式增量，可忽略（完整参数在 tool-call 中）
+              break;
+
+            case 'tool-input-end':
               break;
 
             case 'tool-call': {
@@ -189,8 +227,22 @@ export async function POST(req: Request) {
               });
               break;
 
-            // 忽略其他事件类型（reasoning、source、file 等）
+            case 'source':
+              // 引用来源，暂不处理
+              break;
+
+            case 'file':
+              // 生成的文件，暂不处理
+              break;
+
+            case 'start':
+            case 'abort':
+            case 'raw':
+              break;
+
             default:
+              // 未知事件类型，打印日志以便排查
+              console.log('[stream] 未知事件:', part.type, JSON.stringify(part).slice(0, 200));
               break;
           }
         }
