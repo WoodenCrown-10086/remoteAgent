@@ -1,7 +1,7 @@
 import { Sandbox } from '@e2b/code-interpreter';
 import { buildSystemPrompt } from '@/agent/prompts';
 import { runAgent, createPersistCallback } from '@/agent/runner';
-import { buildContext } from '@/agent/context';
+import { buildContext, saveSummary } from '@/agent/context';
 import {
   initDb,
   createSession,
@@ -28,13 +28,14 @@ export async function POST(req: Request) {
   // ── 1. 会话 ──
   let currentSessionId: string;
   if (sessionId) {
+    // 复用已有会话：保留原标题，只更新沙箱和状态
     currentSessionId = sessionId;
     await updateSession(sessionId, {
-      title: prompt.slice(0, 100),
       sandboxId: sandboxId || undefined,
       status: 'active',
     });
   } else {
+    // 新建会话：以首条消息作为标题
     const session = await createSession({
       title: prompt.slice(0, 100),
       sandboxId: sandboxId || undefined,
@@ -51,6 +52,13 @@ export async function POST(req: Request) {
   // 将压缩摘要注入 system prompt
   if (ctx.summary) {
     systemPrompt += `\n\n## 历史上下文摘要\n${ctx.summary}`;
+  }
+
+  // 将压缩摘要持久化到 sessions 表（下次增量合并的基础）
+  if (ctx.summary) {
+    await saveSummary(currentSessionId, ctx.summary).catch((e) =>
+      console.error('[db saveSummary]', e.message),
+    );
   }
 
   console.log(
