@@ -9,6 +9,8 @@ export const sessions = sqliteTable(
     title: text('title').notNull().default('未命名会话'),
     sandboxId: text('sandbox_id'),
     status: text('status').notNull().default('active'), // active | paused | killed
+    summary: text('summary'),                       // 滚动摘要
+    summaryTokens: integer('summary_tokens'),       // 摘要 token 数
     createdAt: text('created_at').notNull(),
     updatedAt: text('updated_at').notNull(),
   },
@@ -46,9 +48,31 @@ export const messages = sqliteTable(
   ],
 );
 
+// ── message_chunks 消息块表（RAG 向量检索）──
+
+export const messageChunks = sqliteTable(
+  'message_chunks',
+  {
+    id: text('id').primaryKey(),
+    sessionId: text('session_id')
+      .notNull()
+      .references(() => sessions.id, { onDelete: 'cascade' }),
+    sourceMessageId: text('source_message_id'),
+    content: text('content').notNull(),
+    embedding: text('embedding').notNull(),  // JSON 数组字符串
+    kind: text('kind').notNull(),            // user | assistant_text | tool_result | file
+    seqFrom: integer('seq_from'),
+    seqTo: integer('seq_to'),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => [index('idx_chunks_session').on(t.sessionId)],
+);
+
 // ── 类型导出 ──
 
 export type Session = typeof sessions.$inferSelect;
 export type NewSession = typeof sessions.$inferInsert;
 export type Message = typeof messages.$inferSelect;
 export type NewMessage = typeof messages.$inferInsert;
+export type MessageChunk = typeof messageChunks.$inferSelect;
+export type NewMessageChunk = typeof messageChunks.$inferInsert;

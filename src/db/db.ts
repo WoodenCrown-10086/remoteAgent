@@ -1,3 +1,4 @@
+import * as sqliteVec from 'sqlite-vec';
 import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import * as schema from './schema';
@@ -21,6 +22,7 @@ function getDb() {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
     const sqlite = new Database(DB_PATH);
+    sqliteVec.load(sqlite); // 加载 sqlite-vec 扩展（向量检索）
     sqlite.pragma('journal_mode = WAL');
     sqlite.pragma('foreign_keys = ON');
     _db = drizzle(sqlite, { schema });
@@ -59,6 +61,19 @@ export async function initDb() {
     );
     CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
     CREATE INDEX IF NOT EXISTS idx_messages_sequence ON messages(session_id, sequence);
+
+    CREATE TABLE IF NOT EXISTS message_chunks (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+      source_message_id TEXT,
+      content TEXT NOT NULL,
+      embedding TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      seq_from INTEGER,
+      seq_to INTEGER,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_chunks_session ON message_chunks(session_id);
   `);
   return db;
 }
@@ -85,7 +100,7 @@ export async function createSession(input: {
 
 export async function updateSession(
   id: string,
-  updates: Partial<Pick<Session, 'title' | 'sandboxId' | 'status'>>,
+  updates: Partial<Pick<Session, 'title' | 'sandboxId' | 'status' | 'summary' | 'summaryTokens'>>,
 ) {
   const db = getDb();
   const data: Record<string, unknown> = {
@@ -94,6 +109,8 @@ export async function updateSession(
   if (updates.title !== undefined) data.title = updates.title;
   if (updates.sandboxId !== undefined) data.sandboxId = updates.sandboxId;
   if (updates.status !== undefined) data.status = updates.status;
+  if (updates.summary !== undefined) data.summary = updates.summary;
+  if (updates.summaryTokens !== undefined) data.summary_tokens = updates.summaryTokens;
   await db.update(schema.sessions).set(data).where(eq(schema.sessions.id, id));
 }
 
