@@ -1,7 +1,10 @@
 import { Sandbox } from '@e2b/code-interpreter';
 import { buildSystemPrompt } from '@/agent/prompts';
 import { runAgent, createPersistCallback } from '@/agent/runner';
-import { buildContext, saveSummary } from '@/agent/context';
+import { saveSummary } from '@/agent/context';
+import { ContextManager } from '@/agent/memory/context-manager';
+import { createEmbeddingProvider } from '@/agent/memory/embedding';
+import { createMemorySearchTool } from '@/agent/tools/memory-search';
 import {
   initDb,
   createSession,
@@ -47,7 +50,18 @@ export async function POST(req: Request) {
   let systemPrompt = await buildSystemPrompt({ prompt, requestedSkills });
 
   // ── 2.5 构建上下文（加载历史 + 必要时压缩）──
-  const ctx = await buildContext(currentSessionId, prompt, { apiKey });
+  // ── 2.6 记忆管理器（增量摘要 + 向量检索）──
+  const embeddingProvider = createEmbeddingProvider(
+    (process.env.EMBEDDING_PROVIDER as 'local' | 'openai') || 'local',
+    apiKey,
+  );
+  const contextManager = new ContextManager({
+    sessionId: currentSessionId,
+    embeddingProvider,
+    apiKey,
+    enableVector: true,
+  });
+  const ctx = await contextManager.buildContext(prompt);
 
   // 将压缩摘要注入 system prompt
   if (ctx.summary) {
@@ -89,6 +103,13 @@ export async function POST(req: Request) {
     read_skill: createReadSkillTool(),
   };
 
+  // 上下文被压缩时注入记忆检索工具（回忆早期历史）
+  if (ctx.compressed) {
+    (tools as any).memory_search = createMemorySearchTool(
+      contextManager.search.bind(contextManager),
+    );
+  }
+
   // ── 5. 写入用户消息 ──
   const sequence = await getNextSequence(currentSessionId);
   await insertMessage({
@@ -116,7 +137,11 @@ export async function POST(req: Request) {
       onPersist: createPersistCallback(
         currentSessionId,
         sandbox.sandboxId,
-        insertMessage,
+        (async (input: any) => {
+          const msg = await insertMessage(input);
+          contextManager.onMessagePersisted(msg as any).catch(() => {});
+          return msg;
+        }) as any,
       ),
       onFinish: (status) => {
         const finalStatus = shouldKill ? 'killed' : 'paused';
