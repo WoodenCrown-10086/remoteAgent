@@ -42,3 +42,6 @@ next-env.d.ts
 
 # 本地数据库（会话记录）
 /data/
+
+# 实现计划文档不入库（用户规定）
+/docs/reasonix/plans/
