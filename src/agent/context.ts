@@ -1,7 +1,7 @@
 import { getEncoding } from 'js-tiktoken';
 import { generateText } from 'ai';
 import { createDeepseek } from '@/lib/deepseek';
-import { getSessionMessages } from '@/db/db';
+import { getSessionMessages, updateSession } from '@/db/db';
 import type { Message as DbMessage } from '@/db/schema';
 
 // ── AI SDK 消息类型（本地定义）──
@@ -20,7 +20,7 @@ export interface CoreMessage {
 
 // ── Token 计数 ──
 
-const COMPRESS_THRESHOLD = 6000;
+const COMPRESS_THRESHOLD = 15000;
 const KEEP_RECENT_RATIO = 0.45; // 保留最近 45% 的消息
 
 let _encoder: ReturnType<typeof getEncoding> | null = null;
@@ -84,18 +84,28 @@ export function convertDbToCoreMessages(dbMessages: ParsedDbMessage[]): CoreMess
     args: Record<string, unknown>;
   }> = [];
 
+  // 记录最近一个 assistant 消息里的 tool-call ids，用于校验 tool_result 的匹配
+  let lastAssistantToolCallIds: Set<string> = new Set();
+  // 已完成配对的 toolCallId（防止重复 tool_result）
+  const consumedToolCallIds = new Set<string>();
+
   const flushAssistant = () => {
-    if (!pendingText && pendingToolCalls.length === 0) return;
+    if (!pendingText && pendingToolCalls.length === 0) {
+      lastAssistantToolCallIds = new Set();
+      return;
+    }
 
     if (pendingToolCalls.length === 0) {
       // 纯文本
       result.push({ role: 'assistant', content: pendingText });
+      lastAssistantToolCallIds = new Set();
     } else {
       // 文本 + 工具调用
       const content: Array<{ type: 'text'; text: string } | { type: 'tool-call'; toolCallId: string; toolName: string; args: Record<string, unknown> }> = [];
       if (pendingText) content.push({ type: 'text', text: pendingText });
       content.push(...pendingToolCalls);
       result.push({ role: 'assistant', content });
+      lastAssistantToolCallIds = new Set(pendingToolCalls.map((t) => t.toolCallId));
     }
 
     pendingText = '';
@@ -109,6 +119,7 @@ export function convertDbToCoreMessages(dbMessages: ParsedDbMessage[]): CoreMess
     if (m.type === 'user') {
       flushAssistant();
       result.push({ role: 'user', content: m.content || '' });
+      consumedToolCallIds.clear();
       continue;
     }
 
@@ -137,13 +148,25 @@ export function convertDbToCoreMessages(dbMessages: ParsedDbMessage[]): CoreMess
 
     // 工具结果
     if (m.type === 'tool_result') {
+      const toolCallId = (meta.toolCallId as string) || `${meta.toolName}-${Date.now()}`;
+
+      // 防护：tool_result 必须匹配上一个 assistant 消息中的 tool-call，
+      // 且未被消费过。否则跳过（孤立结果，防止 schema 校验失败）
+      if (!lastAssistantToolCallIds.has(toolCallId) || consumedToolCallIds.has(toolCallId)) {
+        console.warn(
+          `[context] 跳过孤立的 tool_result: toolCallId=${toolCallId} toolName=${meta.toolName}`,
+        );
+        continue;
+      }
+      consumedToolCallIds.add(toolCallId);
+
       flushAssistant();
       result.push({
         role: 'tool',
         content: [
           {
             type: 'tool-result',
-            toolCallId: (meta.toolCallId as string) || `${meta.toolName}-${Date.now()}`,
+            toolCallId,
             toolName: (meta.toolName as string) || 'unknown',
             result: meta.toolResult,
           },
@@ -154,7 +177,67 @@ export function convertDbToCoreMessages(dbMessages: ParsedDbMessage[]): CoreMess
   }
 
   flushAssistant();
-  return result;
+
+  // ── 全量清洗：剥离所有未配对的 tool-call ──
+  // 场景：persist 异步写入导致 tool_call/tool_result 顺序颠倒或缺失，
+  // 转换后可能出现 assistant 消息带 tool-call 但没有对应 tool-result。
+  // AI SDK 的 ModelMessage schema 会拒绝这类消息，因此：
+  //   1. 收集所有已配对（有 tool 消息提供结果）的 toolCallId
+  //   2. 从 assistant 消息中剥离未配对的 tool-call
+  //   3. 若剥离后 assistant 消息只剩 tool-call（无文本），整条删除
+  const pairedIds = new Set<string>();
+  for (const msg of result) {
+    if (msg.role === 'tool' && Array.isArray(msg.content)) {
+      for (const part of msg.content) {
+        if (part.type === 'tool-result') pairedIds.add(part.toolCallId);
+      }
+    }
+  }
+
+  const cleaned = result.filter((msg) => {
+    if (msg.role !== 'assistant' || typeof msg.content === 'string') return true;
+    const content = msg.content as unknown as Array<{ type: string; text?: string; toolCallId?: string }>;
+    const hasToolCall = content.some((p) => p.type === 'tool-call');
+    if (!hasToolCall) return true;
+
+    const textParts = content.filter((p) => p.type === 'text');
+    const keptCalls = content.filter(
+      (p) => p.type !== 'tool-call' || pairedIds.has(p.toolCallId as string),
+    );
+
+    // 纯 tool-call 消息（无文本且全部未配对）→ 删除
+    if (keptCalls.filter((p) => p.type === 'tool-call').length === 0 && textParts.length === 0) {
+      return false;
+    }
+
+    // 有文本保留，剥离未配对 tool-call
+    (msg as any).content = [
+      ...textParts,
+      ...keptCalls.filter((p) => p.type === 'tool-call'),
+    ];
+    return true;
+  });
+
+  // 清洗后如果以未配对的 tool-call 结尾（例如 assistant 消息被部分保留），
+  // 确保最后一个 assistant 消息没有残留 tool-call
+  const finalResult = cleaned.filter((msg, i) => {
+    if (msg.role !== 'assistant' || typeof msg.content === 'string') return true;
+    const content = msg.content as unknown as Array<{ type: string; text?: string }>;
+    const hasToolCall = content.some((p) => p.type === 'tool-call');
+    if (!hasToolCall) return true;
+    // 若这是最后一条消息且带 tool-call，剥离 tool-call
+    if (i === cleaned.length - 1) {
+      const textParts = content.filter((p) => p.type === 'text');
+      if (textParts.length > 0) {
+        (msg as any).content = textParts.map((p) => p.text).join('');
+        return true;
+      }
+      return false;
+    }
+    return true;
+  });
+
+  return finalResult;
 }
 
 // ── 压缩引擎 ──
@@ -310,4 +393,20 @@ export async function buildContext(
     totalTokens: compressedTokens + (summary ? encoder().encode(summary).length : 0),
     compressed: true,
   };
+}
+
+// ── 摘要落库 ──
+
+/**
+ * 将压缩生成的摘要写入会话记录，供后续会话恢复上下文时使用。
+ */
+export async function saveSummary(
+  sessionId: string,
+  summary: string,
+): Promise<void> {
+  const tokens = encoder().encode(summary).length;
+  await updateSession(sessionId, {
+    summary,
+    summaryTokens: tokens,
+  });
 }

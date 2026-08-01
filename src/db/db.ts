@@ -42,6 +42,8 @@ export async function initDb() {
       title TEXT NOT NULL DEFAULT '未命名会话',
       sandbox_id TEXT,
       status TEXT NOT NULL DEFAULT 'active',
+      summary TEXT,
+      summary_tokens INTEGER,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -75,6 +77,17 @@ export async function initDb() {
     );
     CREATE INDEX IF NOT EXISTS idx_chunks_session ON message_chunks(session_id);
   `);
+  // 兼容旧库：补充 summary / summary_tokens 列（若不存在）
+  try {
+    sqlite.exec('ALTER TABLE sessions ADD COLUMN summary TEXT;');
+  } catch {
+    // 列已存在，忽略
+  }
+  try {
+    sqlite.exec('ALTER TABLE sessions ADD COLUMN summary_tokens INTEGER;');
+  } catch {
+    // 列已存在，忽略
+  }
   return db;
 }
 
