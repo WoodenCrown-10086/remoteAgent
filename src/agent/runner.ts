@@ -1,5 +1,5 @@
 import { streamText, stepCountIs } from 'ai';
-import { deepseek } from '@/lib/deepseek';
+import { createDeepseek } from '@/lib/deepseek';
 import type { AgentRunInput, StreamContext, SSEEvent } from './types';
 import { EVENT_TYPE_MAP } from './types';
 
@@ -15,10 +15,12 @@ export interface RunAgentParams {
   tools: Record<string, any>;
   context: StreamContext;
   maxSteps?: number;
+  /** API key（前端设置），用于本次 Agent 调用 */
+  apiKey?: string;
 }
 
 export function runAgent(params: RunAgentParams): ReadableStream {
-  const { input, messages, systemPrompt, tools, context, maxSteps = 100 } = params;
+  const { input, messages, systemPrompt, tools, context, maxSteps = 100, apiKey } = params;
   const { sandbox, sessionId, startSequence, sandboxCreated, meta } = input;
 
   const encoder = new TextEncoder();
@@ -56,7 +58,7 @@ export function runAgent(params: RunAgentParams): ReadableStream {
 
         // ── AI SDK streamText ──
         const result = streamText({
-          model: deepseek('deepseek-v4-flash'),
+          model: createDeepseek(apiKey)('deepseek-v4-flash'),
           system: systemPrompt,
           messages,
           tools,

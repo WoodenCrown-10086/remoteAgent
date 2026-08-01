@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import { apiFetch } from '@/lib/api';
 import {
   Folder,
   FolderOpen,
@@ -146,7 +147,7 @@ export default function SandboxPanel({
     (async () => {
       setFileLoading(true);
       try {
-        const res = await fetch(
+        const res = await apiFetch(
           `/api/sandbox?action=files&sandboxId=${sandboxId}&dir=/home/user`,
         );
         if (!res.ok) {
@@ -172,7 +173,7 @@ export default function SandboxPanel({
       setFileContentLoading(true);
       setSelectedPath(path);
       try {
-        const res = await fetch(
+        const res = await apiFetch(
           `/api/sandbox?action=read&sandboxId=${sandboxId}&path=${encodeURIComponent(path)}`,
         );
         if (!res.ok) {
@@ -203,7 +204,7 @@ export default function SandboxPanel({
         setHostLoading(false);
         return;
       }
-      const res = await fetch(
+      const res = await apiFetch(
         `/api/sandbox?action=host&sandboxId=${sandboxId}&port=${port}`,
       );
       if (!res.ok) {
@@ -288,7 +289,7 @@ export default function SandboxPanel({
                   // 强制重新加载：通过切换 tab 再切回来
                   setFileTree([]);
                   setFileLoading(true);
-                  fetch(`/api/sandbox?action=files&sandboxId=${sandboxId}&dir=/home/user`)
+                  apiFetch(`/api/sandbox?action=files&sandboxId=${sandboxId}&dir=/home/user`)
                     .then((r) => r.json())
                     .then((d) => setFileTree(d.tree || []))
                     .catch(console.error)

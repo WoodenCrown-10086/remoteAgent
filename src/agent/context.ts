@@ -1,6 +1,6 @@
 import { getEncoding } from 'js-tiktoken';
 import { generateText } from 'ai';
-import { deepseek } from '@/lib/deepseek';
+import { createDeepseek } from '@/lib/deepseek';
 import { getSessionMessages } from '@/db/db';
 import type { Message as DbMessage } from '@/db/schema';
 
@@ -179,10 +179,11 @@ const SUMMARIZE_PROMPT = `你是一个上下文压缩器。将以下对话历史
  */
 async function summarizeMessages(
   messages: CoreMessage[],
+  apiKey?: string,
 ): Promise<string> {
   try {
     const { text } = await generateText({
-      model: deepseek('deepseek-v4-flash'),
+      model: createDeepseek(apiKey)('deepseek-v4-flash'),
       system: SUMMARIZE_PROMPT,
       messages: [
         {
@@ -228,6 +229,8 @@ export interface BuildContextOptions {
   compressThreshold?: number;
   /** 保留最近消息的比例 */
   keepRecentRatio?: number;
+  /** API key（前端设置），用于压缩调用 */
+  apiKey?: string;
 }
 
 /**
@@ -291,7 +294,7 @@ export async function buildContext(
   const recentMessages = historyMessages.slice(safeSplit);
 
   const summary = earlyMessages.length > 0
-    ? await summarizeMessages(earlyMessages)
+    ? await summarizeMessages(earlyMessages, options.apiKey)
     : null;
 
   const compressedMessages: CoreMessage[] = [

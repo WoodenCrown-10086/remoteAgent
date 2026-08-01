@@ -18,6 +18,10 @@ export async function POST(req: Request) {
   const { prompt, sandboxId, skills: requestedSkills, sessionId } = body;
   const shouldKill: boolean = body.action === 'kill';
 
+  // ── 从请求头读取 API key（前端设置优先，回退环境变量）──
+  const apiKey = req.headers.get('x-api-key') || undefined;
+  const e2bApiKey = req.headers.get('x-e2b-api-key') || undefined;
+
   // ── 0. 数据库 ──
   await initDb();
 
@@ -42,7 +46,7 @@ export async function POST(req: Request) {
   let systemPrompt = await buildSystemPrompt({ prompt, requestedSkills });
 
   // ── 2.5 构建上下文（加载历史 + 必要时压缩）──
-  const ctx = await buildContext(currentSessionId, prompt);
+  const ctx = await buildContext(currentSessionId, prompt, { apiKey });
 
   // 将压缩摘要注入 system prompt
   if (ctx.summary) {
@@ -58,13 +62,16 @@ export async function POST(req: Request) {
   let sandboxCreated = false;
   if (sandboxId) {
     try {
-      sandbox = (await Sandbox.connect(sandboxId, { timeoutMs: 300_000 })) as Sandbox;
+      sandbox = (await Sandbox.connect(sandboxId, {
+        timeoutMs: 300_000,
+        apiKey: e2bApiKey,
+      })) as Sandbox;
     } catch {
-      sandbox = await Sandbox.create({ timeoutMs: 300_000 });
+      sandbox = await Sandbox.create({ timeoutMs: 300_000, apiKey: e2bApiKey });
       sandboxCreated = true;
     }
   } else {
-    sandbox = await Sandbox.create({ timeoutMs: 300_000 });
+    sandbox = await Sandbox.create({ timeoutMs: 300_000, apiKey: e2bApiKey });
     sandboxCreated = true;
   }
 
@@ -96,6 +103,7 @@ export async function POST(req: Request) {
     messages: ctx.messages,
     systemPrompt,
     tools,
+    apiKey,
     context: {
       onPersist: createPersistCallback(
         currentSessionId,

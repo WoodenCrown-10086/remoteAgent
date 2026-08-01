@@ -58,6 +58,9 @@ export async function GET(req: Request) {
   const filePath = searchParams.get('path');
   const portStr = searchParams.get('port');
 
+  // e2b API key（前端设置优先，回退环境变量）
+  const e2bApiKey = req.headers.get('x-e2b-api-key') || undefined;
+
   if (!sandboxId) {
     return Response.json({ error: '缺少 sandboxId' }, { status: 400 });
   }
@@ -66,6 +69,7 @@ export async function GET(req: Request) {
   try {
     sandbox = (await Sandbox.connect(sandboxId, {
       timeoutMs: 30_000,
+      apiKey: e2bApiKey,
     })) as Sandbox;
 
     // ── 扁平文件列表（find 命令，兼容旧版） ──

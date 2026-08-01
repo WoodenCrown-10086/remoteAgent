@@ -3,6 +3,8 @@ import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { Virtuoso, VirtuosoHandle } from 'react-virtuoso';
 import SandboxPanel from '@/components/sandbox-panel';
 import SessionSidebar from '@/components/session-sidebar';
+import ApiKeySettings from '@/components/api-key-settings';
+import { apiFetch } from '@/lib/api';
 import { Wrench, CheckCircle2, XCircle, ChevronDown, ChevronRight, Loader2, User, Bot } from 'lucide-react';
 
 // ── 类型 ──
@@ -158,6 +160,30 @@ export default function Home() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [sidebarRefreshKey, setSidebarRefreshKey] = useState(0);
+
+  // ── API Key 状态 ──
+  const [apiKey, setApiKey] = useState('');
+  const [e2bApiKey, setE2bApiKey] = useState('');
+
+  // ── 页面加载时恢复 apiKey ──
+  useEffect(() => {
+    const saved = localStorage.getItem('deepseekApiKey');
+    if (saved) setApiKey(saved);
+    const savedE2b = localStorage.getItem('e2bApiKey');
+    if (savedE2b) setE2bApiKey(savedE2b);
+  }, []);
+
+  // ── apiKey 变化时持久化 ──
+  useEffect(() => {
+    if (apiKey) localStorage.setItem('deepseekApiKey', apiKey);
+    else localStorage.removeItem('deepseekApiKey');
+  }, [apiKey]);
+
+  // ── e2bApiKey 变化时持久化 ──
+  useEffect(() => {
+    if (e2bApiKey) localStorage.setItem('e2bApiKey', e2bApiKey);
+    else localStorage.removeItem('e2bApiKey');
+  }, [e2bApiKey]);
 
   // ── 页面加载时恢复 sessionId ──
   useEffect(() => {
@@ -379,7 +405,7 @@ export default function Home() {
       if (sandboxId) body.sandboxId = sandboxId;
       if (sessionId) body.sessionId = sessionId;
 
-      const res = await fetch('/api/hello', {
+      const res = await apiFetch('/api/hello', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -521,7 +547,7 @@ export default function Home() {
     if (!sandboxId) return;
     setLoading(true);
     try {
-      await fetch('/api/hello', {
+      await apiFetch('/api/hello', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt: 'echo ok', sandboxId, action: 'kill' }),
@@ -645,17 +671,29 @@ export default function Home() {
               {sandboxId.slice(0, 12)}...
             </code>
             <span className="text-gray-400 text-xs">{sandboxStatus}</span>
-            <button
-              onClick={killSandbox}
-              disabled={loading}
-              className="ml-auto px-2 py-0.5 bg-red-100 text-red-600 rounded text-xs hover:bg-red-200 disabled:opacity-50"
-            >
-              销毁
-            </button>
           </>
         ) : (
           <span className="text-gray-400 text-xs">无活跃沙箱</span>
         )}
+        <span className="ml-auto flex items-center gap-1">
+          {sandboxId && (
+            <button
+              onClick={killSandbox}
+              disabled={loading}
+              className="px-2 py-0.5 bg-red-100 text-red-600 rounded text-xs hover:bg-red-200 disabled:opacity-50"
+            >
+              销毁
+            </button>
+          )}
+          <ApiKeySettings
+            apiKey={apiKey}
+            e2bApiKey={e2bApiKey}
+            onSave={(k, e2bK) => {
+              setApiKey(k);
+              setE2bApiKey(e2bK);
+            }}
+          />
+        </span>
       </div>
 
       {/* 主体：会话侧栏 + 聊天区 + 面板 + 日志 */}
