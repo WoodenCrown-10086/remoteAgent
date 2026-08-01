@@ -1,4 +1,7 @@
 import type { EmbeddingProvider, SearchResult } from './types';
+import { getDb } from '@/db/db';
+import { messageChunks } from '@/db/schema';
+import { eq } from 'drizzle-orm';
 
 export interface ChunkInput {
   id: string;
@@ -55,4 +58,38 @@ export function cosine(a: number[], b: number[]): number {
     nb += b[i] * b[i];
   }
   return dot / (Math.sqrt(na) * Math.sqrt(nb) || 1);
+}
+
+// ── DB 持久化 ──
+
+/** 将单个块写入 message_chunks 表（embedding 序列化为 JSON 字符串） */
+export async function persistChunk(chunk: ChunkInput): Promise<void> {
+  const db = getDb();
+  await db.insert(messageChunks).values({
+    id: chunk.id,
+    sessionId: chunk.sessionId,
+    sourceMessageId: chunk.sourceMessageId || null,
+    content: chunk.content,
+    embedding: JSON.stringify(chunk.embedding),
+    kind: chunk.kind,
+    seqFrom: chunk.seqFrom,
+    seqTo: chunk.seqTo,
+    createdAt: new Date().toISOString(),
+  });
+}
+
+/** 从 message_chunks 表加载某会话的全部块，用于恢复内存向量库 */
+export async function loadChunks(sessionId: string): Promise<ChunkInput[]> {
+  const db = getDb();
+  const rows = await db.select().from(messageChunks).where(eq(messageChunks.sessionId, sessionId));
+  return rows.map((r) => ({
+    id: r.id,
+    sessionId: r.sessionId,
+    sourceMessageId: r.sourceMessageId || undefined,
+    content: r.content,
+    kind: r.kind as ChunkInput['kind'],
+    embedding: JSON.parse(r.embedding),
+    seqFrom: r.seqFrom ?? 0,
+    seqTo: r.seqTo ?? 0,
+  }));
 }

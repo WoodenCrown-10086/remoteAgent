@@ -13,7 +13,7 @@ const DB_PATH =
 // ── 单例连接 ──
 let _db: ReturnType<typeof drizzle> | null = null;
 
-function getDb() {
+export function getDb() {
   if (!_db) {
     // 确保目录存在
     const fs = require('fs');
