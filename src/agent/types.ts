@@ -78,6 +78,7 @@ export const EVENT_TYPE_MAP: Record<string, string> = {
   step_start: 'step',
   step_finish: 'step_finish',
   text: 'text',
+  reasoning_delta: 'reasoning',
   tool_call: 'tool_call',
   tool_result: 'tool_result',
   tool_error: 'tool_error',

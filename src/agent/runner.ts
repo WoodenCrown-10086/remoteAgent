@@ -89,15 +89,16 @@ export function runAgent(params: RunAgentParams): ReadableStream {
               break;
 
             case 'reasoning-start':
-              send({ type: 'text', content: '🧠 ' });
+              send({ type: 'reasoning_start' });
               break;
 
             case 'reasoning-delta':
-              send({ type: 'text', content: (part as any).text });
+              // 思考内容独立事件（前端折叠显示，不混入正式回复）
+              send({ type: 'reasoning_delta', content: (part as any).text });
               break;
 
             case 'reasoning-end':
-              send({ type: 'text', content: '\n' });
+              send({ type: 'reasoning_end' });
               break;
 
             case 'tool-call': {
@@ -226,6 +227,8 @@ export function createPersistCallback(
 
   return (data: SSEEvent, sequence: number) => {
     if (data.type === 'init') return;
+    // 无内容的标记事件不落库（step_start 除外，它推进 stepIndex）
+    if (data.type === 'reasoning_start' || data.type === 'reasoning_end') return;
     if (data.type === 'step_start') currentStepIndex = (data.index as number) ?? currentStepIndex;
 
     const type = EVENT_TYPE_MAP[data.type as string] || (data.type as string);

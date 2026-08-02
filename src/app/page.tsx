@@ -5,9 +5,12 @@ import SandboxPanel from '@/components/sandbox-panel';
 import SessionSidebar from '@/components/session-sidebar';
 import ApiKeySettings from '@/components/api-key-settings';
 import LogPanel from '@/components/log-panel';
+import MessageCard from '@/components/chat/message-card';
+import type { MessageCardItem } from '@/components/chat/message-card';
+import type { ToolCallCardProps } from '@/components/chat/tool-call-card';
 import AgentStatusBar, { AgentStatus } from '@/components/agent-status-bar';
 import { apiFetch } from '@/lib/api';
-import { Wrench, CheckCircle2, XCircle, ChevronDown, ChevronRight, Loader2, User, Bot } from 'lucide-react';
+import { CheckCircle2, Loader2, Bot } from 'lucide-react';
 
 // ── 类型 ──
 
@@ -25,7 +28,7 @@ interface TerminalLine {
 
 interface ActivityEntry {
   time: string;
-  type: 'user' | 'text' | 'tool_call' | 'tool_result' | 'tool_error' | 'step' | 'step_finish' | 'done' | 'error';
+  type: 'user' | 'text' | 'reasoning' | 'tool_call' | 'tool_result' | 'tool_error' | 'step' | 'step_finish' | 'done' | 'error';
   content?: string;
   toolName?: string;
   toolArgs?: Record<string, unknown>;
@@ -35,24 +38,16 @@ interface ActivityEntry {
   error?: string;
 }
 
-interface ToolItem {
-  key: string;
-  name: string;
-  args?: Record<string, unknown>;
-  result?: unknown;
-  error?: string;
-}
-
 interface BubbleItem {
-  type: 'text' | 'tool';
+  type: 'text' | 'reasoning' | 'tool';
   content?: string;
-  tool?: ToolItem;
+  tool?: ToolCallCardProps;
 }
 
 interface ChatBubble {
   role: 'user' | 'assistant';
   time: string;
-  items: BubbleItem[];
+  items: MessageCardItem[];
 }
 
 interface VirtuosoItem {
@@ -68,80 +63,6 @@ interface SessionItem {
   updatedAt: string;
 }
 
-// ── 工具卡片渲染（提取为独立组件以避免重渲染）──
-
-function ToolCard({
-  tool,
-  expandedTools,
-  onToggle,
-}: {
-  tool: ToolItem;
-  expandedTools: Set<string>;
-  onToggle: (key: string) => void;
-}) {
-  const isExpanded = expandedTools.has(tool.key);
-  const ok =
-    typeof tool.result === 'object' &&
-    tool.result !== null &&
-    (tool.result as Record<string, unknown>)?.success === true;
-  const hasError = !!tool.error;
-
-  const displayArgs = tool.args ? { ...tool.args } : undefined;
-  if (displayArgs && tool.name === 'write_file' && typeof displayArgs.content === 'string') {
-    const c = displayArgs.content as string;
-    if (c.length > 200) {
-      displayArgs.content = c.slice(0, 200) + `... (共 ${c.length} 字符)`;
-    }
-  }
-
-  return (
-    <div className="rounded border border-blue-200 bg-blue-50/50 overflow-hidden my-1">
-      <button
-        onClick={() => onToggle(tool.key)}
-        className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs hover:bg-blue-100/50 transition-colors"
-      >
-        {isExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-        <Wrench size={12} className="text-blue-500" />
-        <span className="font-mono font-medium text-blue-700">{tool.name}</span>
-        {hasError ? (
-          <XCircle size={12} className="text-red-500 ml-auto" />
-        ) : tool.result !== undefined ? (
-          ok ? (
-            <CheckCircle2 size={12} className="text-green-500 ml-auto" />
-          ) : (
-            <XCircle size={12} className="text-orange-500 ml-auto" />
-          )
-        ) : (
-          <Loader2 size={12} className="text-blue-400 animate-spin ml-auto" />
-        )}
-      </button>
-      {isExpanded && displayArgs && (
-        <div className="px-3 pb-2">
-          <pre className="text-xs font-mono text-gray-600 whitespace-pre-wrap break-all bg-white/50 rounded p-1.5 border border-blue-100">
-            {JSON.stringify(displayArgs, null, 2)}
-          </pre>
-          {tool.result !== undefined && (
-            <div
-              className={`mt-1 text-xs px-1.5 py-0.5 rounded ${
-                ok ? 'text-green-700 bg-green-50' : 'text-orange-700 bg-orange-50'
-              }`}
-            >
-              {typeof tool.result === 'string'
-                ? tool.result.slice(0, 500)
-                : JSON.stringify(tool.result).slice(0, 500)}
-            </div>
-          )}
-          {tool.error && (
-            <div className="mt-1 text-xs px-1.5 py-0.5 rounded text-red-700 bg-red-50">
-              {tool.error}
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ── 主组件 ──
 
 export default function Home() {
@@ -154,7 +75,8 @@ export default function Home() {
   const [activity, setActivity] = useState<ActivityEntry[]>([]);
   const [terminalLines, setTerminalLines] = useState<TerminalLine[]>([]);
   const abortRef = useRef<AbortController | null>(null);
-  const [expandedTools, setExpandedTools] = useState<Set<string>>(new Set());
+  // reasoning 流式累积（reasoning_start → delta → end 拼成完整思考）
+  const reasoningRef = useRef('');
   const virtuosoRef = useRef<VirtuosoHandle>(null);
 
   // ── 会话状态 ──
@@ -235,7 +157,6 @@ export default function Home() {
 
       setActivity(entries);
       setSessionId(sid);
-      setExpandedTools(new Set());
 
       // 从会话记录恢复关联的沙箱（刷新页面后沙箱 ID 只存在 DB 里）
       // Drizzle 返回 camelCase: sandboxId（DB 列名 sandbox_id）
@@ -266,7 +187,6 @@ export default function Home() {
     setSummary('');
     setLogs([]);
     setTerminalLines([]);
-    setExpandedTools(new Set());
   }, []);
 
   const handleSessionDelete = useCallback(
@@ -282,37 +202,94 @@ export default function Home() {
     [sessionId, handleSessionNew],
   );
 
+  // ── 工具调用 → ToolCallCardProps 转换 ──
+  const toToolCardProps = useCallback(
+    (toolName: string, args?: Record<string, unknown>, result?: unknown, error?: string): ToolCallCardProps => {
+      const ok = typeof result === 'object' && result !== null && (result as Record<string, unknown>)?.success === true;
+      const status = error ? 'error' : result === undefined ? 'running' : ok ? 'success' : 'error';
+      const resultSummary =
+        error ||
+        (typeof result === 'string'
+          ? result.slice(0, 200)
+          : typeof result === 'object' && result !== null
+            ? ((result as Record<string, unknown>)?.message as string) ||
+              JSON.stringify(result).slice(0, 200)
+            : '');
+
+      // 命令执行
+      if (toolName === 'execute_command') {
+        return {
+          kind: 'command',
+          toolName,
+          command: (args?.command as string) || '',
+          status,
+          args,
+          resultSummary,
+        };
+      }
+      // 文件改动
+      if (toolName === 'write_file' || toolName === 'edit_file') {
+        const path = (args?.path as string) || '';
+        const additions =
+          toolName === 'write_file'
+            ? String(args?.content || '').split('\n').length
+            : String(args?.new_string || '').split('\n').length;
+        const deletions =
+          toolName === 'edit_file'
+            ? String(args?.old_string || '').split('\n').length
+            : 0;
+        return {
+          kind: 'file',
+          toolName,
+          files: [{ path, additions, deletions }],
+          status,
+          args,
+          resultSummary,
+        };
+      }
+      // 通用工具
+      return {
+        kind: 'generic',
+        toolName,
+        status,
+        args,
+        resultSummary,
+      };
+    },
+    [],
+  );
+
   // ── 将 activity 转换为聊天气泡 ──
   const bubbles = useMemo<ChatBubble[]>(() => {
     const result: ChatBubble[] = [];
     let currentBubble: ChatBubble | null = null;
-    let toolCallIdx = 0;
+
+    const pushBubble = () => {
+      if (currentBubble && currentBubble.items.length > 0) {
+        result.push(currentBubble);
+      }
+      currentBubble = null;
+    };
 
     for (const entry of activity) {
       if (entry.type === 'user') {
-        if (currentBubble) {
-          result.push(currentBubble);
-          currentBubble = null;
-        }
+        pushBubble();
         result.push({
           role: 'user',
           time: entry.time,
-          items: [{ type: 'text', content: entry.content }],
+          items: [{ type: 'text', content: entry.content || '' }],
         });
         continue;
       }
 
       if (entry.type === 'step') {
-        if (currentBubble) result.push(currentBubble);
+        pushBubble();
         currentBubble = { role: 'assistant', time: entry.time, items: [] };
         continue;
       }
 
       if (entry.type === 'step_finish' || entry.type === 'done' || entry.type === 'error') {
-        if (currentBubble) {
-          result.push(currentBubble);
-          currentBubble = null;
-        }
+        pushBubble();
         continue;
       }
 
@@ -323,16 +300,25 @@ export default function Home() {
         if (lastItem?.type === 'text') {
           lastItem.content = (lastItem.content || '') + (entry.content || '');
         } else {
-          currentBubble.items.push({ type: 'text', content: entry.content });
+          currentBubble.items.push({ type: 'text', content: entry.content || '' });
+        }
+        continue;
+      }
+
+      if (entry.type === 'reasoning') {
+        const lastItem = currentBubble.items[currentBubble.items.length - 1];
+        if (lastItem?.type === 'reasoning') {
+          lastItem.content = (lastItem.content || '') + (entry.content || '');
+        } else {
+          currentBubble.items.push({ type: 'reasoning', content: entry.content || '' });
         }
         continue;
       }
 
       if (entry.type === 'tool_call') {
-        const key = `tool-${toolCallIdx++}`;
         currentBubble.items.push({
           type: 'tool',
-          tool: { key, name: entry.toolName || '未知工具', args: entry.toolArgs },
+          tool: toToolCardProps(entry.toolName || 'unknown', entry.toolArgs),
         });
         continue;
       }
@@ -340,8 +326,12 @@ export default function Home() {
       if (entry.type === 'tool_result') {
         for (let i = currentBubble.items.length - 1; i >= 0; i--) {
           const item = currentBubble.items[i];
-          if (item.type === 'tool' && item.tool && !item.tool.result && !item.tool.error) {
-            item.tool.result = entry.toolResult;
+          if (item.type === 'tool' && item.tool && item.tool.status === 'running') {
+            item.tool = toToolCardProps(
+              item.tool.toolName || 'unknown',
+              item.tool.args,
+              entry.toolResult,
+            );
             break;
           }
         }
@@ -351,8 +341,13 @@ export default function Home() {
       if (entry.type === 'tool_error') {
         for (let i = currentBubble.items.length - 1; i >= 0; i--) {
           const item = currentBubble.items[i];
-          if (item.type === 'tool' && item.tool && !item.tool.result && !item.tool.error) {
-            item.tool.error = entry.error;
+          if (item.type === 'tool' && item.tool && item.tool.status === 'running') {
+            item.tool = toToolCardProps(
+              item.tool.toolName || 'unknown',
+              item.tool.args,
+              undefined,
+              entry.error,
+            );
             break;
           }
         }
@@ -360,9 +355,9 @@ export default function Home() {
       }
     }
 
-    if (currentBubble) result.push(currentBubble);
+    pushBubble();
     return result;
-  }, [activity]);
+  }, [activity, toToolCardProps]);
 
   // ── Virtuoso 数据列表 ──
   const virtuosoData = useMemo<VirtuosoItem[]>(() => {
@@ -399,7 +394,6 @@ export default function Home() {
     setSummary('');
     setLogs([]);
     setTerminalLines([]);
-    setExpandedTools(new Set());
     abortRef.current = new AbortController();
 
     // 清空输入框
@@ -486,6 +480,21 @@ export default function Home() {
               case 'text':
                 addActivity({ type: 'text', content: event.content });
                 break;
+
+              case 'reasoning_start':
+                reasoningRef.current = '';
+                break;
+
+              case 'reasoning_delta':
+                reasoningRef.current += event.content || '';
+                break;
+
+              case 'reasoning_end': {
+                const r = reasoningRef.current.trim();
+                reasoningRef.current = '';
+                if (r) addActivity({ type: 'reasoning', content: r });
+                break;
+              }
 
               case 'tool_call':
                 addActivity({ type: 'tool_call', toolName: event.toolName, toolArgs: event.args });
@@ -640,58 +649,12 @@ export default function Home() {
       // type === 'bubble'
       const bubble = item.bubble!;
       return (
-        <div
-          className={`flex gap-2 px-3 py-1 ${
-            bubble.role === 'user' ? 'justify-end' : 'justify-start'
-          }`}
-        >
-          {bubble.role === 'assistant' && (
-            <div className="shrink-0 w-7 h-7 rounded-full bg-gradient-to-br from-blue-400 to-purple-500 flex items-center justify-center mt-0.5">
-              <Bot size={14} className="text-white" />
-            </div>
-          )}
-          <div
-            className={`max-w-[85%] rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed ${
-              bubble.role === 'user'
-                ? 'bg-blue-500 text-white rounded-br-md'
-                : 'bg-gray-100 text-gray-800 rounded-bl-md'
-            }`}
-          >
-            {bubble.items.map((bi, ii) => {
-              if (bi.type === 'text') {
-                return (
-                  <div key={ii} className="whitespace-pre-wrap break-words">
-                    {bi.content}
-                  </div>
-                );
-              }
-              if (bi.type === 'tool' && bi.tool) {
-                return (
-                  <ToolCard
-                    key={bi.tool.key}
-                    tool={bi.tool}
-                    expandedTools={expandedTools}
-                    onToggle={(key) => {
-                      const next = new Set(expandedTools);
-                      if (next.has(key)) next.delete(key);
-                      else next.add(key);
-                      setExpandedTools(next);
-                    }}
-                  />
-                );
-              }
-              return null;
-            })}
-          </div>
-          {bubble.role === 'user' && (
-            <div className="shrink-0 w-7 h-7 rounded-full bg-gray-300 flex items-center justify-center mt-0.5">
-              <User size={14} className="text-gray-600" />
-            </div>
-          )}
+        <div className="px-3 py-1">
+          <MessageCard role={bubble.role} items={bubble.items} time={bubble.time} />
         </div>
       );
     },
-    [expandedTools],
+    [],
   );
 
   return (
