@@ -1,4 +1,3 @@
-import * as sqliteVec from 'sqlite-vec';
 import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import * as schema from './schema';
@@ -13,6 +12,33 @@ const DB_PATH =
 // ── 单例连接 ──
 let _db: ReturnType<typeof drizzle> | null = null;
 
+/**
+ * 定位 sqlite-vec 原生扩展（vec0.dll/.dylib/.so）的绝对路径。
+ *
+ * 不用 sqlite-vec 包内自带的 load()（它内部用 require.resolve，
+ * 在 Turbopack 下会被替换成未实现的 import.meta.resolve 而失败）。
+ * 这里手动按平台约定构造路径。
+ */
+function getVecExtensionPath(): string | null {
+  const fs = require('fs');
+  const path = require('path');
+  const platform = process.platform; // win32 | darwin | linux
+  const arch = process.arch;         // x64 | arm64
+  const os = platform === 'win32' ? 'windows' : platform;
+  const suffix = platform === 'win32' ? 'dll' : platform === 'darwin' ? 'dylib' : 'so';
+
+  const candidates = [
+    // 平台分包：sqlite-vec-windows-x64/vec0.dll
+    path.join(process.cwd(), 'node_modules', `sqlite-vec-${os}-${arch}`, `vec0.${suffix}`),
+    // 兜底：主包内
+    path.join(process.cwd(), 'node_modules', 'sqlite-vec', `vec0.${suffix}`),
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
 export function getDb() {
   if (!_db) {
     // 确保目录存在
@@ -23,7 +49,13 @@ export function getDb() {
 
     const sqlite = new Database(DB_PATH);
     try {
-      sqliteVec.load(sqlite); // 加载 sqlite-vec 扩展（向量检索）
+      const extPath = getVecExtensionPath();
+      if (extPath) {
+        sqlite.loadExtension(extPath);
+        console.log(`[db] sqlite-vec 扩展加载成功: ${extPath}`);
+      } else {
+        console.warn('[db] 未找到 sqlite-vec 原生扩展文件，向量检索不可用（不影响主流程）');
+      }
     } catch (e) {
       console.error('[db] sqlite-vec 加载失败，向量检索不可用（不影响主流程）', e);
     }
@@ -129,12 +161,14 @@ export async function updateSession(
   const data: Record<string, unknown> = {
     updatedAt: new Date().toISOString(),
   };
+  // 注意：drizzle 的 .set() 键必须是 schema 字段名（camelCase），
+  // 不是 DB 列名（snake_case）——buildUpdateSet 用 set[字段名] 取值
   if (updates.title !== undefined) data.title = updates.title;
-  if (updates.sandboxId !== undefined) data.sandbox_id = updates.sandboxId;
+  if (updates.sandboxId !== undefined) data.sandboxId = updates.sandboxId;
   if (updates.status !== undefined) data.status = updates.status;
   if (updates.summary !== undefined) data.summary = updates.summary;
-  if (updates.summaryTokens !== undefined) data.summary_tokens = updates.summaryTokens;
-  if (updates.summarySeq !== undefined) data.summary_seq = updates.summarySeq;
+  if (updates.summaryTokens !== undefined) data.summaryTokens = updates.summaryTokens;
+  if (updates.summarySeq !== undefined) data.summarySeq = updates.summarySeq;
   await db.update(schema.sessions).set(data).where(eq(schema.sessions.id, id));
 }
 

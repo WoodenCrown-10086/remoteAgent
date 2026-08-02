@@ -7,6 +7,7 @@ import { createMemorySearchTool } from '@/agent/tools/memory-search';
 import {
   initDb,
   createSession,
+  getSession,
   updateSession,
   insertMessage,
   getNextSequence,
@@ -24,25 +25,41 @@ export async function POST(req: Request) {
   const apiKey = req.headers.get('x-api-key') || undefined;
   const e2bApiKey = req.headers.get('x-e2b-api-key') || undefined;
 
+  // ── 接口生命周期日志（供系统日志面板调试）──
+  console.log(`[api] POST /api/hello 调用`, {
+    sessionId: sessionId?.slice(0, 8),
+    action: body.action || 'pause',
+    promptLen: prompt?.length,
+    hasApiKey: !!apiKey,
+    hasE2bKey: !!e2bApiKey,
+  });
+
   // ── 0. 数据库 ──
   await initDb();
 
   // ── 1. 会话 ──
+  // 原则：一个会话绑定一个独立沙箱（sessions.sandbox_id 为权威）
+  // 前端传入的 sandboxId 只在会话未绑定时作为兜底，绝不覆盖已绑定值
   let currentSessionId: string;
+  let boundSandboxId: string | undefined = sandboxId || undefined;
   if (sessionId) {
-    // 复用已有会话：保留原标题，只更新沙箱和状态
     currentSessionId = sessionId;
+    const existing = await getSession(sessionId);
+    if (existing?.sandboxId) {
+      // 会话已绑定沙箱 → 优先使用绑定值，忽略前端传入
+      boundSandboxId = existing.sandboxId;
+    }
     await updateSession(sessionId, {
-      sandboxId: sandboxId || undefined,
       status: 'active',
     });
   } else {
-    // 新建会话：以首条消息作为标题
+    // 新建会话：以首条消息作为标题，绑定前端传入的沙箱（若有）
     const session = await createSession({
       title: prompt.slice(0, 100),
       sandboxId: sandboxId || undefined,
     });
     currentSessionId = session.id;
+    boundSandboxId = sandboxId || undefined;
   }
 
   // ── 2. System Prompt ──
@@ -72,12 +89,12 @@ export async function POST(req: Request) {
     `[context] session=${currentSessionId.slice(0, 8)} messages=${ctx.messages.length} tokens=${ctx.totalTokens} compressed=${ctx.compressed}`,
   );
 
-  // ── 3. 沙箱 ──
+  // ── 3. 沙箱（用会话绑定值，前端传入仅兜底） ──
   let sandbox: Sandbox | null = null;
   let sandboxCreated = false;
-  if (sandboxId) {
+  if (boundSandboxId) {
     try {
-      sandbox = (await Sandbox.connect(sandboxId, {
+      sandbox = (await Sandbox.connect(boundSandboxId, {
         timeoutMs: 300_000,
         apiKey: e2bApiKey,
       })) as Sandbox;
@@ -88,6 +105,16 @@ export async function POST(req: Request) {
   } else {
     sandbox = await Sandbox.create({ timeoutMs: 300_000, apiKey: e2bApiKey });
     sandboxCreated = true;
+  }
+
+  // ── 3.5 沙箱就绪后立即绑定到会话 ──
+  // 不依赖 onFinish 时序（onFinish 在 SSE 流结束后才执行，且其闭包
+  // 引用的 sandbox 变量可能在流处理过程中失去 sandboxId）
+  if (!shouldKill && sandbox?.sandboxId) {
+    await updateSession(currentSessionId, {
+      sandboxId: sandbox.sandboxId,
+    }).catch((e) => console.error('[db sandbox bind]', e.message));
+    console.log(`[route] 沙箱已绑定到会话: ${currentSessionId.slice(0, 8)} → ${sandbox.sandboxId.slice(0, 12)}`);
   }
 
   // ── 4. 工具 ──
@@ -160,6 +187,11 @@ export async function POST(req: Request) {
         }
       } finally {
         reader.releaseLock();
+        console.log(`[api] POST /api/hello 完成`, {
+          sessionId: currentSessionId.slice(0, 8),
+          sandboxId: sandbox?.sandboxId?.slice(0, 12),
+          sandboxStatus: shouldKill ? 'killed' : 'paused',
+        });
         if (sandbox) {
           try {
             if (shouldKill) await sandbox.kill();

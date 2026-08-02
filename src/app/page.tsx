@@ -4,6 +4,7 @@ import { Virtuoso, VirtuosoHandle } from 'react-virtuoso';
 import SandboxPanel from '@/components/sandbox-panel';
 import SessionSidebar from '@/components/session-sidebar';
 import ApiKeySettings from '@/components/api-key-settings';
+import LogPanel from '@/components/log-panel';
 import { apiFetch } from '@/lib/api';
 import { Wrench, CheckCircle2, XCircle, ChevronDown, ChevronRight, Loader2, User, Bot } from 'lucide-react';
 
@@ -236,11 +237,10 @@ export default function Home() {
 
       // 从会话记录恢复关联的沙箱（刷新页面后沙箱 ID 只存在 DB 里）
       // Drizzle 返回 camelCase: sandboxId（DB 列名 sandbox_id）
+      // 注意：无绑定值时显式清空，避免残留上一个会话的沙箱 ID
       const sbId = data.session?.sandboxId as string | undefined;
-      if (sbId) {
-        setSandboxId(sbId);
-        setSandboxStatus('已恢复');
-      }
+      setSandboxId(sbId ?? null);
+      setSandboxStatus(sbId ? '已恢复' : '');
     } catch (e) {
       console.error('加载历史失败', e);
     } finally {
@@ -803,32 +803,8 @@ export default function Home() {
           <SandboxPanel sandboxId={sandboxId} terminalLines={terminalLines} />
         </div>
 
-        {/* 日志面板 */}
-        <div className="w-1/3 bg-gray-900 text-gray-200 flex flex-col shrink-0">
-          <div className="px-3 py-2 border-b border-gray-700 text-xs font-semibold text-gray-400 uppercase tracking-wide">
-            系统日志
-          </div>
-          <div className="flex-1 overflow-auto p-2 font-mono text-xs leading-relaxed">
-            {logs.length === 0 ? (
-              <p className="text-gray-600 italic">等待事件...</p>
-            ) : (
-              logs.map((entry, i) => (
-                <div
-                  key={i}
-                  className={`leading-relaxed ${
-                    entry.type === 'error'
-                      ? 'text-red-400'
-                      : entry.type === 'tool'
-                        ? 'text-yellow-300'
-                        : 'text-gray-300'
-                  }`}
-                >
-                  <span className="text-gray-600">{entry.time}</span> {entry.text}
-                </div>
-              ))
-            )}
-          </div>
-        </div>
+        {/* 日志看板（模型执行日志 + 系统日志） */}
+        <LogPanel modelLogs={logs} />
       </div>
     </main>
   );

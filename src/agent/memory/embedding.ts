@@ -1,5 +1,38 @@
 import type { EmbeddingProvider } from './types';
 
+// ── 模型来源配置 ──
+// transformers.js 首次加载模型会从 HuggingFace Hub 下载（bge-small-zh 约 100MB）。
+// 网络受限时提供两种替代：
+//   1. HF 镜像：默认走 hf-mirror.com（中国网络友好），可用环境变量 HF_ENDPOINT 覆盖
+//   2. 本地模型：设 EMBEDDING_LOCAL_PATH 指向已下载的模型目录，完全离线
+// 模型下载成功后缓存到 node_modules 缓存目录，后续无需重复下载。
+//
+// 注意：必须静态导入 env 并与 pipeline 同实例 —— 在 Turbopack 下
+// require() 和动态 import() 可能拿到不同模块实例，导致 env 配置不生效
+// （表现为仍连 huggingface.co）。
+
+import { env, pipeline } from '@xenova/transformers';
+
+function configureTransformersEnv() {
+  // 允许本地模型优先
+  env.allowLocalModels = true;
+  env.allowRemoteModels = true;
+
+  const localPath = process.env.EMBEDDING_LOCAL_PATH;
+  if (localPath) {
+    // 完全离线模式：使用本地模型目录
+    env.localModelPath = localPath.endsWith('/') ? localPath : localPath + '/';
+    console.log(`[embedding] 使用本地模型: ${env.localModelPath}`);
+  } else {
+    // 远程模式：默认 HF 镜像，可用 HF_ENDPOINT 覆盖
+    env.remoteHost = process.env.HF_ENDPOINT || 'https://hf-mirror.com/';
+    console.log(
+      `[embedding] model download source: ${env.remoteHost} ` +
+        `(override with HF_ENDPOINT, or set EMBEDDING_LOCAL_PATH for local)`,
+    );
+  }
+}
+
 /**
  * 本地嵌入实现：使用 Xenova/bge-small-zh-v1.5 模型，
  * 通过 transformers.js 在本地生成 384 维向量。
@@ -12,11 +45,18 @@ export class LocalEmbedding implements EmbeddingProvider {
 
   private async getPipe() {
     if (!this.pipe) {
-      const { pipeline } = await import('@xenova/transformers');
+      configureTransformersEnv();
       try {
         this.pipe = await pipeline('feature-extraction', this.model);
       } catch (e) {
-        console.error(`[embedding] 本地模型 ${this.model} 加载失败:`, e);
+        // 注意: 此消息避免使用全角标点（。，：）
+        // next-code-frame 的 Rust 高亮按字节切片, 多字节字符会触发 panic
+        console.error(
+          `[embedding] model ${this.model} load failed. ` +
+            `Set HF_ENDPOINT=https://hf-mirror.com/ or EMBEDDING_LOCAL_PATH=... ` +
+            `to use mirror/local model.`,
+          e,
+        );
         throw e;
       }
     }
@@ -30,7 +70,6 @@ export class LocalEmbedding implements EmbeddingProvider {
       const output = await pipe(text, { pooling: 'mean', normalize: true });
       results.push(Array.from(output.data as Float32Array));
     }
-    console.log('embedding', results)
     return results;
   }
 }

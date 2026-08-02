@@ -170,9 +170,20 @@ export function runAgent(params: RunAgentParams): ReadableStream {
         }
 
         controller.close();
+        // 通知回调：会话状态/沙箱绑定在此落库（route 层 onFinish）
+        try {
+          await context.onFinish?.('done', sandbox.sandboxId);
+        } catch (e) {
+          console.error('[runner] onFinish(done) 失败:', e);
+        }
       } catch (err: any) {
         send({ type: 'error', error: err.message || 'Stream error' });
         controller.close();
+        try {
+          await context.onFinish?.('error', sandbox.sandboxId);
+        } catch (e) {
+          console.error('[runner] onFinish(error) 失败:', e);
+        }
       }
     },
   });
