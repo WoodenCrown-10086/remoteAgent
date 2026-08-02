@@ -1,7 +1,8 @@
 import { getEncoding } from 'js-tiktoken';
 import { generateText } from 'ai';
 import { createDeepseek } from '@/lib/deepseek';
-import { getSessionMessages, updateSession } from '@/db/db';
+import { getSession, getSessionMessages, getSessionMessagesAfterSeq, updateSession } from '@/db/db';
+import { mergeSummary, MAX_SUMMARY_TOKENS } from './memory/summary-store';
 import type { Message as DbMessage } from '@/db/schema';
 
 // ── AI SDK 消息类型（本地定义）──
@@ -257,6 +258,31 @@ const SUMMARIZE_PROMPT = `你是一个上下文压缩器。将以下对话历史
 
 输出格式：一段连续的摘要文字（不要用 Markdown 列表，不要编号）。`;
 
+/** 将 DB 消息序列化为纯文本（供摘要 LLM 使用） */
+function serializeDbMessages(dbMessages: Array<{ role: string; type: string; content: string | null; metadata: Record<string, unknown> | null }>): string {
+  return dbMessages
+    .map((m) => {
+      const meta = m.metadata || {};
+      const detail =
+        m.type === 'tool_result'
+          ? JSON.stringify(meta.toolResult).slice(0, 500)
+          : m.content || '';
+      return `[${m.role}/${m.type}]: ${detail}`;
+    })
+    .join('\n');
+}
+
+/** 适配 summary-store 的 LlmSummarizeFn */
+async function summarizeText(prompt: string, apiKey?: string): Promise<string> {
+  const { text } = await generateText({
+    model: createDeepseek(apiKey)('deepseek-v4-flash'),
+    system: SUMMARIZE_PROMPT,
+    messages: [{ role: 'user', content: prompt }],
+    temperature: 0.3,
+  });
+  return text;
+}
+
 /**
  * 调用 LLM 压缩早期消息为一段摘要文本
  */
@@ -329,64 +355,68 @@ export async function buildContext(
   const threshold = options.compressThreshold ?? COMPRESS_THRESHOLD;
   const keepRatio = options.keepRecentRatio ?? KEEP_RECENT_RATIO;
 
-  // 1. 从 DB 加载
-  const dbMessages = await getSessionMessages(sessionId);
-  const parsed = dbMessages.map((m) => ({
+  // 读取会话（含已落库的滚动摘要与断点）
+  const session = await getSession(sessionId);
+  const existingSummary = session?.summary ?? null;
+  const summarySeq = session?.summarySeq ?? -1;
+
+  const parse = (m: { id: string; role: string; type: string; content: string | null; metadata: string | null }) => ({
     id: m.id,
     role: m.role,
     type: m.type,
     content: m.content,
     metadata: m.metadata ? (JSON.parse(m.metadata) as Record<string, unknown>) : null,
-  }));
+  });
 
-  // 2. 转换为 CoreMessage
-  const historyMessages = convertDbToCoreMessages(parsed);
+  // 1. 加载候选消息：有摘要则只取断点之后的新消息
+  const dbMessages = summarySeq >= 0
+    ? await getSessionMessagesAfterSeq(sessionId, summarySeq)
+    : await getSessionMessages(sessionId);
+  const historyMessages = convertDbToCoreMessages(dbMessages.map(parse));
 
-  // 3. 附加当前用户消息
+  // 2. 附加当前用户消息
   const fullMessages: CoreMessage[] = [
     ...historyMessages,
     { role: 'user', content: currentPrompt } as CoreMessage,
   ];
 
-  // 4. Token 计数
+  // 3. Token 计数
   const totalTokens = countTokens(fullMessages);
 
-  // 5. 是否需要压缩？
+  // 4. 未超限：直接返回（有摘要则注入 system）
   if (totalTokens <= threshold) {
     return {
       messages: fullMessages,
-      summary: null,
+      summary: existingSummary,
       totalTokens,
       compressed: false,
     };
   }
 
-  // 6. 压缩：切分早期消息 → LLM 压缩 → 摘要 + 近期消息
-  const splitIdx = Math.floor(historyMessages.length * (1 - keepRatio));
-
-  // 确保不在完整轮次中间切分（找到最近的 user 消息边界）
-  let safeSplit = splitIdx;
-  for (let i = splitIdx; i < historyMessages.length; i++) {
-    if (historyMessages[i].role === 'user') {
-      safeSplit = i;
-      break;
-    }
-  }
-
-  const earlyMessages = historyMessages.slice(0, safeSplit);
-  const recentMessages = historyMessages.slice(safeSplit);
-
-  const summary = earlyMessages.length > 0
-    ? await summarizeMessages(earlyMessages, options.apiKey)
-    : null;
-
+  // 5. 超限：按 DB 消息条数切分（早期 → 摘要，近期 → 完整保留）
+  const splitIdx = Math.max(1, Math.floor(dbMessages.length * (1 - keepRatio)));
+  const earlyDb = dbMessages.slice(0, splitIdx);
+  const recentDb = dbMessages.slice(splitIdx);
+  const recentMessages = convertDbToCoreMessages(recentDb.map(parse));
   const compressedMessages: CoreMessage[] = [
     ...recentMessages,
     { role: 'user', content: currentPrompt } as CoreMessage,
   ];
 
-  const compressedTokens = countTokens(compressedMessages);
+  // 6. 生成摘要：有旧摘要则增量合并，否则首次压缩
+  const earlyText = serializeDbMessages(earlyDb.map(parse));
+  let summary: string;
+  if (existingSummary) {
+    summary = await mergeSummary(existingSummary, earlyText, (p) => summarizeText(p, options.apiKey), MAX_SUMMARY_TOKENS);
+  } else {
+    summary = await summarizeText(earlyText, options.apiKey);
+  }
 
+  // 7. 落库摘要 + 断点
+  const newSeq = earlyDb[earlyDb.length - 1]?.sequence ?? -1;
+  await saveSummary(sessionId, summary, newSeq);
+
+  const compressedTokens = countTokens(compressedMessages);
   return {
     messages: compressedMessages,
     summary,
@@ -399,14 +429,17 @@ export async function buildContext(
 
 /**
  * 将压缩生成的摘要写入会话记录，供后续会话恢复上下文时使用。
+ * summarySeq 记录已并入摘要的最后一条消息 sequence（断点），默认 -1 表示未设置。
  */
 export async function saveSummary(
   sessionId: string,
   summary: string,
+  summarySeq: number = -1,
 ): Promise<void> {
   const tokens = encoder().encode(summary).length;
   await updateSession(sessionId, {
     summary,
     summaryTokens: tokens,
+    summarySeq,
   });
 }

@@ -13,7 +13,12 @@ export class LocalEmbedding implements EmbeddingProvider {
   private async getPipe() {
     if (!this.pipe) {
       const { pipeline } = await import('@xenova/transformers');
-      this.pipe = await pipeline('feature-extraction', this.model);
+      try {
+        this.pipe = await pipeline('feature-extraction', this.model);
+      } catch (e) {
+        console.error(`[embedding] 本地模型 ${this.model} 加载失败:`, e);
+        throw e;
+      }
     }
     return this.pipe;
   }
@@ -25,6 +30,7 @@ export class LocalEmbedding implements EmbeddingProvider {
       const output = await pipe(text, { pooling: 'mean', normalize: true });
       results.push(Array.from(output.data as Float32Array));
     }
+    console.log('embedding', results)
     return results;
   }
 }

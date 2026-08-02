@@ -1,7 +1,6 @@
 import { Sandbox } from '@e2b/code-interpreter';
 import { buildSystemPrompt } from '@/agent/prompts';
 import { runAgent, createPersistCallback } from '@/agent/runner';
-import { saveSummary } from '@/agent/context';
 import { ContextManager } from '@/agent/memory/context-manager';
 import { createEmbeddingProvider } from '@/agent/memory/embedding';
 import { createMemorySearchTool } from '@/agent/tools/memory-search';
@@ -55,6 +54,7 @@ export async function POST(req: Request) {
     (process.env.EMBEDDING_PROVIDER as 'local' | 'openai') || 'local',
     apiKey,
   );
+  console.log('huxiao', embeddingProvider)
   const contextManager = new ContextManager({
     sessionId: currentSessionId,
     embeddingProvider,
@@ -62,17 +62,10 @@ export async function POST(req: Request) {
     enableVector: true,
   });
   const ctx = await contextManager.buildContext(prompt);
-
+  console.log('asd',ctx)
   // 将压缩摘要注入 system prompt
   if (ctx.summary) {
     systemPrompt += `\n\n## 历史上下文摘要\n${ctx.summary}`;
-  }
-
-  // 将压缩摘要持久化到 sessions 表（下次增量合并的基础）
-  if (ctx.summary) {
-    await saveSummary(currentSessionId, ctx.summary).catch((e) =>
-      console.error('[db saveSummary]', e.message),
-    );
   }
 
   console.log(
@@ -139,7 +132,9 @@ export async function POST(req: Request) {
         sandbox.sandboxId,
         (async (input: any) => {
           const msg = await insertMessage(input);
-          contextManager.onMessagePersisted(msg as any).catch(() => {});
+          contextManager.onMessagePersisted(msg as any).catch((e) =>
+            console.error('[memory vectorize] 异步向量化失败:', e),
+          );
           return msg;
         }) as any,
       ),

@@ -11,6 +11,7 @@ export const sessions = sqliteTable(
     status: text('status').notNull().default('active'), // active | paused | killed
     summary: text('summary'),                       // 滚动摘要
     summaryTokens: integer('summary_tokens'),       // 摘要 token 数
+    summarySeq: integer('summary_seq'),             // 已并入摘要的最后一条消息 sequence
     createdAt: text('created_at').notNull(),
     updatedAt: text('updated_at').notNull(),
   },

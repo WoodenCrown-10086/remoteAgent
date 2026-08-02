@@ -2,7 +2,7 @@ import * as sqliteVec from 'sqlite-vec';
 import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import * as schema from './schema';
-import { eq, desc, and } from 'drizzle-orm';
+import { eq, desc, and, gt } from 'drizzle-orm';
 import { v4 as uuid } from 'uuid';
 import type { Session, NewSession, Message, NewMessage } from './schema';
 
@@ -22,7 +22,11 @@ export function getDb() {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
     const sqlite = new Database(DB_PATH);
-    sqliteVec.load(sqlite); // 加载 sqlite-vec 扩展（向量检索）
+    try {
+      sqliteVec.load(sqlite); // 加载 sqlite-vec 扩展（向量检索）
+    } catch (e) {
+      console.error('[db] sqlite-vec 加载失败，向量检索不可用（不影响主流程）', e);
+    }
     sqlite.pragma('journal_mode = WAL');
     sqlite.pragma('foreign_keys = ON');
     _db = drizzle(sqlite, { schema });
@@ -44,6 +48,7 @@ export async function initDb() {
       status TEXT NOT NULL DEFAULT 'active',
       summary TEXT,
       summary_tokens INTEGER,
+      summary_seq INTEGER,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -88,6 +93,11 @@ export async function initDb() {
   } catch {
     // 列已存在，忽略
   }
+  try {
+    sqlite.exec('ALTER TABLE sessions ADD COLUMN summary_seq INTEGER;');
+  } catch {
+    // 列已存在，忽略
+  }
   return db;
 }
 
@@ -113,17 +123,18 @@ export async function createSession(input: {
 
 export async function updateSession(
   id: string,
-  updates: Partial<Pick<Session, 'title' | 'sandboxId' | 'status' | 'summary' | 'summaryTokens'>>,
+  updates: Partial<Pick<Session, 'title' | 'sandboxId' | 'status' | 'summary' | 'summaryTokens' | 'summarySeq'>>,
 ) {
   const db = getDb();
   const data: Record<string, unknown> = {
     updatedAt: new Date().toISOString(),
   };
   if (updates.title !== undefined) data.title = updates.title;
-  if (updates.sandboxId !== undefined) data.sandboxId = updates.sandboxId;
+  if (updates.sandboxId !== undefined) data.sandbox_id = updates.sandboxId;
   if (updates.status !== undefined) data.status = updates.status;
   if (updates.summary !== undefined) data.summary = updates.summary;
   if (updates.summaryTokens !== undefined) data.summary_tokens = updates.summaryTokens;
+  if (updates.summarySeq !== undefined) data.summary_seq = updates.summarySeq;
   await db.update(schema.sessions).set(data).where(eq(schema.sessions.id, id));
 }
 
@@ -188,6 +199,21 @@ export async function getSessionMessages(
     .select()
     .from(schema.messages)
     .where(eq(schema.messages.sessionId, sessionId))
+    .orderBy(schema.messages.createdAt, schema.messages.sequence);
+}
+
+/** 获取某会话 sequence 大于指定值的消息（断点之后的新消息） */
+export async function getSessionMessagesAfterSeq(
+  sessionId: string,
+  seq: number,
+): Promise<Message[]> {
+  const db = getDb();
+  return db
+    .select()
+    .from(schema.messages)
+    .where(
+      and(eq(schema.messages.sessionId, sessionId), gt(schema.messages.sequence, seq)),
+    )
     .orderBy(schema.messages.createdAt, schema.messages.sequence);
 }
 

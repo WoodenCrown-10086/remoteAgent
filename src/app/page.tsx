@@ -233,6 +233,14 @@ export default function Home() {
       setActivity(entries);
       setSessionId(sid);
       setExpandedTools(new Set());
+
+      // 从会话记录恢复关联的沙箱（刷新页面后沙箱 ID 只存在 DB 里）
+      // Drizzle 返回 camelCase: sandboxId（DB 列名 sandbox_id）
+      const sbId = data.session?.sandboxId as string | undefined;
+      if (sbId) {
+        setSandboxId(sbId);
+        setSandboxStatus('已恢复');
+      }
     } catch (e) {
       console.error('加载历史失败', e);
     } finally {
@@ -251,6 +259,8 @@ export default function Home() {
   const handleSessionNew = useCallback(() => {
     setActivity([]);
     setSessionId(null);
+    setSandboxId(null);
+    setSandboxStatus('');
     setSummary('');
     setLogs([]);
     setTerminalLines([]);
@@ -380,7 +390,8 @@ export default function Home() {
   };
 
   const callApi = async (killAfter: boolean) => {
-    if (!prompt.trim()) return;
+    const message = prompt.trim();
+    if (!message) return;
 
     setLoading(true);
     setSummary('');
@@ -389,17 +400,20 @@ export default function Home() {
     setExpandedTools(new Set());
     abortRef.current = new AbortController();
 
+    // 清空输入框
+    setPrompt('');
+
     // 新建会话时清空历史，复用会话时保留
     if (!sessionId) {
       setActivity([]);
     }
 
     // 添加用户消息
-    addActivity({ type: 'user', content: prompt });
+    addActivity({ type: 'user', content: message });
 
     try {
       const body: Record<string, unknown> = {
-        prompt,
+        prompt: message,
         action: killAfter ? 'kill' : 'pause',
       };
       if (sandboxId) body.sandboxId = sandboxId;
@@ -746,13 +760,13 @@ export default function Home() {
             <textarea
               className="w-full border rounded p-2 text-sm resize-none"
               rows={3}
-              placeholder="输入任务描述..."
+              placeholder="输入任务描述，Enter 发送，Shift+Enter 换行"
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault();
-                  callApi(false);
+                  if (!loading) callApi(false);
                 }
               }}
             />
@@ -762,7 +776,7 @@ export default function Home() {
                 disabled={loading || !prompt.trim()}
                 className="px-4 py-1.5 bg-blue-500 text-white rounded text-sm disabled:opacity-50 hover:bg-blue-600"
               >
-                {loading ? '执行中...' : '发送 (复用)'}
+                {loading ? '执行中...' : '发送'}
               </button>
               <button
                 onClick={() => callApi(true)}
