@@ -1,4 +1,5 @@
 import { Sandbox } from '@e2b/code-interpreter';
+import { Orchestrator } from '@/agent/orchestrator';
 import { buildSystemPrompt } from '@/agent/prompts';
 import { runAgent, createPersistCallback } from '@/agent/runner';
 import { ContextManager } from '@/agent/memory/context-manager';
@@ -13,6 +14,7 @@ import {
   getNextSequence,
 } from '@/db/db';
 import { createAllSandboxTools, createReadSkillTool } from '@/agent/tools';
+import { createDispatchTool } from '@/agent/tools/dispatch';
 
 export const dynamic = 'force-dynamic';
 
@@ -123,6 +125,22 @@ export async function POST(req: Request) {
     read_skill: createReadSkillTool(),
   };
 
+  // ── 4.1 多 Agent 调度器（主 Agent 通过 dispatch 派发子任务） ──
+  // 子 Agent 事件先入内存队列，主 Agent 事件流中顺带补发
+  let subAgentEvents: Array<Record<string, unknown>> = [];
+  const orchestrator = new Orchestrator({
+    sandbox,
+    sessionId: currentSessionId,
+    apiKey,
+    embeddingProvider,
+    maxParallel: 3,
+    emit: (data) => subAgentEvents.push(data),
+  });
+  // tools 字面量类型无 dispatch 属性，沿用 memory_search 的 any 断言注入方式
+  (tools as any).dispatch = createDispatchTool(
+    (role, task, dependsOn) => orchestrator.dispatch(role, task, dependsOn),
+  );
+
   // 上下文被压缩时注入记忆检索工具（回忆早期历史）
   if (ctx.compressed) {
     (tools as any).memory_search = createMemorySearchTool(
@@ -153,6 +171,8 @@ export async function POST(req: Request) {
     systemPrompt,
     tools,
     apiKey,
+    agentId: 'main',
+    agentRole: 'main',
     context: {
       onPersist: createPersistCallback(
         currentSessionId,
@@ -172,6 +192,12 @@ export async function POST(req: Request) {
           sandboxId: shouldKill ? undefined : sandbox?.sandboxId,
         }).catch((e) => console.error('[db session update]', e.message));
       },
+      // 子 Agent 事件实时注入主 SSE 流（runner send 时 flush 并清空）
+      flushSubEvents: () => {
+        const evs = [...subAgentEvents];
+        subAgentEvents = [];
+        return evs;
+      },
     },
   });
 
@@ -187,6 +213,15 @@ export async function POST(req: Request) {
         }
       } finally {
         reader.releaseLock();
+        // 等待子 Agent 任务完成（带超时，防止死锁）
+        try {
+          const result = await orchestrator.waitAll();
+          if (result.summary) {
+            console.log(`[orchestrator] 子任务汇总 (passed=${result.passed} timedOut=${result.timedOut}):\n${result.summary}`);
+          }
+        } catch (e: any) {
+          console.error('[orchestrator] waitAll 异常:', e.message);
+        }
         console.log(`[api] POST /api/hello 完成`, {
           sessionId: currentSessionId.slice(0, 8),
           sandboxId: sandbox?.sandboxId?.slice(0, 12),

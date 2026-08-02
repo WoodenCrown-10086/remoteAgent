@@ -4,8 +4,19 @@ import type { Sandbox } from '@e2b/code-interpreter';
 
 export interface SSEEvent {
   type: string;
+  /** Agent 实例标识（如 'main' | 'planner' | 'coder-1'） */
+  agentId?: string;
+  /** Agent 角色（'main' | 'planner' | 'coder' | 'reviewer' | 'evaluator'） */
+  agentRole?: string;
   [key: string]: unknown;
 }
+
+// ── 子 Agent 生命周期事件 ──
+
+/** 子 Agent 启动事件（前端亮 icon） */
+export const AGENT_START_EVENT = 'agent_start';
+/** 子 Agent 完成事件（前端熄 icon + 门禁提示） */
+export const AGENT_FINISH_EVENT = 'agent_finish';
 
 // ── Agent 配置 ──
 
@@ -44,6 +55,8 @@ export interface StreamContext {
   onPersist: (data: SSEEvent, sequence: number) => void | Promise<void>;
   /** Agent 完成回调 */
   onFinish?: (status: 'done' | 'error', sandboxId: string | undefined) => void | Promise<void>;
+  /** 外部事件（子 Agent 等）flush 回调：返回待注入主流的事件数组 */
+  flushSubEvents?: () => Array<Record<string, unknown>>;
 }
 
 // ── 持久化消息输入 ──

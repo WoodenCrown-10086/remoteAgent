@@ -17,10 +17,14 @@ export interface RunAgentParams {
   maxSteps?: number;
   /** API key（前端设置），用于本次 Agent 调用 */
   apiKey?: string;
+  /** Agent 实例标识（子 Agent 用） */
+  agentId?: string;
+  /** Agent 角色 */
+  agentRole?: string;
 }
 
 export function runAgent(params: RunAgentParams): ReadableStream {
-  const { input, messages, systemPrompt, tools, context, maxSteps = 100, apiKey } = params;
+  const { input, messages, systemPrompt, tools, context, maxSteps = 100, apiKey, agentId, agentRole } = params;
   const { sandbox, sessionId, startSequence, sandboxCreated, meta } = input;
 
   const encoder = new TextEncoder();
@@ -39,8 +43,20 @@ export function runAgent(params: RunAgentParams): ReadableStream {
     async start(controller) {
       // SSE 发送 + 持久化
       const send = (data: SSEEvent) => {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
-        context.onPersist(data, sequence++);
+        // 先 flush 外部事件（子 Agent 事件），再发主 Agent 事件
+        const subEvents = context.flushSubEvents?.() || [];
+        for (const ev of subEvents) {
+          const enrichedSub = { ...ev } as SSEEvent;
+          // 子 Agent 事件已带自己的 agentId，仅在缺失时才附加主 Agent 的
+          if (!enrichedSub.agentId && agentId) enrichedSub.agentId = agentId;
+          if (!enrichedSub.agentRole && agentRole) enrichedSub.agentRole = agentRole;
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(enrichedSub)}\n\n`));
+        }
+        const enriched: SSEEvent = { ...data };
+        if (agentId) enriched.agentId = agentId;
+        if (agentRole) enriched.agentRole = agentRole;
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(enriched)}\n\n`));
+        context.onPersist(enriched, sequence++);
       };
 
       try {

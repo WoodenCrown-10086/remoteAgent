@@ -5,6 +5,7 @@ import SandboxPanel from '@/components/sandbox-panel';
 import SessionSidebar from '@/components/session-sidebar';
 import ApiKeySettings from '@/components/api-key-settings';
 import LogPanel from '@/components/log-panel';
+import AgentStatusBar, { AgentStatus } from '@/components/agent-status-bar';
 import { apiFetch } from '@/lib/api';
 import { Wrench, CheckCircle2, XCircle, ChevronDown, ChevronRight, Loader2, User, Bot } from 'lucide-react';
 
@@ -161,6 +162,7 @@ export default function Home() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [sidebarRefreshKey, setSidebarRefreshKey] = useState(0);
+  const [agentStatuses, setAgentStatuses] = useState<AgentStatus[]>([]);
 
   // ── API Key 状态 ──
   const [apiKey, setApiKey] = useState('');
@@ -451,6 +453,26 @@ export default function Home() {
             const event = JSON.parse(line.slice(6));
 
             switch (event.type) {
+              case 'agent_start': {
+                setAgentStatuses((prev) => [
+                  ...prev.filter((a) => a.agentId !== event.agentId),
+                  { agentId: event.agentId, agentRole: event.agentRole, status: 'running', task: event.task },
+                ]);
+                addLog(`🚀 子 Agent 启动: ${event.agentId} (${event.agentRole})`, 'info');
+                break;
+              }
+              case 'agent_finish': {
+                setAgentStatuses((prev) =>
+                  prev.map((a) =>
+                    a.agentId === event.agentId
+                      ? { ...a, status: event.status === 'failed' ? 'failed' : 'passed' }
+                      : a,
+                  ),
+                );
+                addLog(`🏁 子 Agent 结束: ${event.agentId} → ${event.status}`, event.status === 'failed' ? 'error' : 'info');
+                break;
+              }
+
               case 'init':
                 setSandboxId(event.sandboxId);
                 setSandboxStatus(event.sandboxCreated ? '新创建' : '已恢复');
@@ -709,6 +731,9 @@ export default function Home() {
           />
         </span>
       </div>
+
+      {/* 子 Agent 状态栏 */}
+      <AgentStatusBar agents={agentStatuses} />
 
       {/* 主体：会话侧栏 + 聊天区 + 面板 + 日志 */}
       <div className="flex-1 flex overflow-hidden">
