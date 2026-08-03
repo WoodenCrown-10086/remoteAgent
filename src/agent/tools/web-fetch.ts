@@ -82,8 +82,9 @@ const maxBytes = ${maxBytes || 50000};
 (async () => {
   try {
     const res = await fetch(url, {
-      signal: AbortSignal.timeout(15000),
-      headers: { 'User-Agent': 'CodingAgent/1.0' },
+      signal: AbortSignal.timeout(30000),
+      // 用 curl UA：部分站点（如 wttr.in）对非 curl/浏览器 UA 直接拒绝
+      headers: { 'User-Agent': 'curl/8.4.0' },
     });
     const text = await res.text();
     const truncated = text.length > maxBytes ? text.slice(0, maxBytes) + '\\n...(truncated)' : text;
@@ -106,7 +107,7 @@ const maxBytes = ${maxBytes || 50000};
       try {
         const result = await sandbox.commands.run(
           `node -e ${JSON.stringify(script)}`,
-          { timeoutMs: 25_000 },
+          { timeoutMs: 45_000 },
         );
 
         // node 脚本把结果 JSON 打印到 stdout

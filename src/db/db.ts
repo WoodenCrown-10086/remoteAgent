@@ -48,16 +48,24 @@ export function getDb() {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
     const sqlite = new Database(DB_PATH);
-    try {
-      const extPath = getVecExtensionPath();
-      if (extPath) {
-        sqlite.loadExtension(extPath);
-        console.log(`[db] sqlite-vec 扩展加载成功: ${extPath}`);
-      } else {
-        console.warn('[db] 未找到 sqlite-vec 原生扩展文件，向量检索不可用（不影响主流程）');
+    // sqlite-vec 扩展加载（向量检索）
+    // 注意：loadExtension 加载不兼容的原生 .so 会直接 Segmentation fault（进程级崩溃，
+    // JS try/catch 无法捕获）。容器/Serverless 环境（无匹配 .so 或 glibc 不符）必须跳过——
+    // 设置环境变量 ENABLE_SQLITE_VEC=0 禁用（向量检索降级，记忆退化为摘要+全量）。
+    if (process.env.ENABLE_SQLITE_VEC !== '0') {
+      try {
+        const extPath = getVecExtensionPath();
+        if (extPath) {
+          sqlite.loadExtension(extPath);
+          console.log(`[db] sqlite-vec 扩展加载成功: ${extPath}`);
+        } else {
+          console.warn('[db] 未找到 sqlite-vec 原生扩展文件，向量检索不可用（不影响主流程）');
+        }
+      } catch (e) {
+        console.error('[db] sqlite-vec 加载失败，向量检索不可用（不影响主流程）', e);
       }
-    } catch (e) {
-      console.error('[db] sqlite-vec 加载失败，向量检索不可用（不影响主流程）', e);
+    } else {
+      console.log('[db] ENABLE_SQLITE_VEC=0，跳过 sqlite-vec 加载（向量检索停用）');
     }
     sqlite.pragma('journal_mode = WAL');
     sqlite.pragma('foreign_keys = ON');

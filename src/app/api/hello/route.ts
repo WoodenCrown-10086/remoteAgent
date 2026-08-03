@@ -69,10 +69,11 @@ export async function POST(req: Request) {
 
   // ── 2.5 构建上下文（加载历史 + 必要时压缩）──
   // ── 2.6 记忆管理器（增量摘要 + 向量检索）──
-  // Vercel Serverless 无原生依赖：EMBEDDING_PROVIDER=none 时禁用向量（记忆退化为摘要）
+  // 嵌入用 API（默认 http=硅基流动）：EMBEDDING_PROVIDER=gemini|openai|http|none
   const embeddingProviderName =
-    (process.env.EMBEDDING_PROVIDER as 'local' | 'openai' | 'none') || 'local';
-  const embeddingProvider = createEmbeddingProvider(embeddingProviderName, apiKey);
+    (process.env.EMBEDDING_PROVIDER as 'gemini' | 'openai' | 'http' | 'none') || 'http';
+  const embeddingKey = process.env.EMBEDDING_API_KEY || apiKey;
+  const embeddingProvider = createEmbeddingProvider(embeddingProviderName, embeddingKey);
   const contextManager = new ContextManager({
     sessionId: currentSessionId,
     embeddingProvider,
