@@ -42,9 +42,8 @@ COPY --from=builder /app/src ./src
 # 模型缓存（预下载的模型）
 COPY --from=builder /app/model-cache ./model-cache
 
-# SQLite 数据目录（挂载卷持久化）
+# SQLite 数据目录（Railway 上用 Railway Volumes 挂载持久化，见部署说明）
 RUN mkdir -p /app/data
-VOLUME ["/app/data"]
 
 EXPOSE 3000
 
