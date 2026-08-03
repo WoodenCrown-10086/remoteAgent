@@ -69,19 +69,17 @@ export async function POST(req: Request) {
 
   // ── 2.5 构建上下文（加载历史 + 必要时压缩）──
   // ── 2.6 记忆管理器（增量摘要 + 向量检索）──
-  const embeddingProvider = createEmbeddingProvider(
-    (process.env.EMBEDDING_PROVIDER as 'local' | 'openai') || 'local',
-    apiKey,
-  );
-  console.log('huxiao', embeddingProvider)
+  // Vercel Serverless 无原生依赖：EMBEDDING_PROVIDER=none 时禁用向量（记忆退化为摘要）
+  const embeddingProviderName =
+    (process.env.EMBEDDING_PROVIDER as 'local' | 'openai' | 'none') || 'local';
+  const embeddingProvider = createEmbeddingProvider(embeddingProviderName, apiKey);
   const contextManager = new ContextManager({
     sessionId: currentSessionId,
     embeddingProvider,
     apiKey,
-    enableVector: true,
+    enableVector: embeddingProviderName !== 'none',
   });
   const ctx = await contextManager.buildContext(prompt);
-  console.log('asd',ctx)
   // 将压缩摘要注入 system prompt
   if (ctx.summary) {
     systemPrompt += `\n\n## 历史上下文摘要\n${ctx.summary}`;

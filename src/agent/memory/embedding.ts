@@ -7,16 +7,24 @@ import type { EmbeddingProvider } from './types';
 //   2. 本地模型：设 EMBEDDING_LOCAL_PATH 指向已下载的模型目录，完全离线
 // 模型下载成功后缓存到 node_modules 缓存目录，后续无需重复下载。
 //
-// 注意：必须静态导入 env 并与 pipeline 同实例 —— 在 Turbopack 下
-// require() 和动态 import() 可能拿到不同模块实例，导致 env 配置不生效
-// （表现为仍连 huggingface.co）。
+// 重要：必须使用动态 import —— @xenova/transformers 在模块顶层静态 import
+// onnxruntime-node（原生 C++ 模块）。若此处静态导入，Vercel Serverless 等
+// 无 libonnxruntime.so 的环境在加载本模块时即崩溃。动态 import 确保只有
+// 真正使用本地嵌入时才加载原生依赖；Serverless 部署请用
+// EMBEDDING_PROVIDER=openai（纯 HTTP，无原生依赖）。
 
-import { env, pipeline } from '@xenova/transformers';
+async function configureTransformersEnv() {
+  // 动态 import：仅在使用本地嵌入时才加载原生模块
+  const { env } = await import('@xenova/transformers');
 
-function configureTransformersEnv() {
   // 允许本地模型优先
   env.allowLocalModels = true;
   env.allowRemoteModels = true;
+
+  // 模型缓存目录（Docker 构建时预下载进镜像，运行时挂载卷）
+  if (process.env.MODEL_CACHE_DIR) {
+    env.cacheDir = process.env.MODEL_CACHE_DIR;
+  }
 
   const localPath = process.env.EMBEDDING_LOCAL_PATH;
   if (localPath) {
@@ -45,7 +53,8 @@ export class LocalEmbedding implements EmbeddingProvider {
 
   private async getPipe() {
     if (!this.pipe) {
-      configureTransformersEnv();
+      const { pipeline } = await import('@xenova/transformers');
+      await configureTransformersEnv();
       try {
         this.pipe = await pipeline('feature-extraction', this.model);
       } catch (e) {
@@ -99,15 +108,33 @@ export class OpenAIEmbedding implements EmbeddingProvider {
 }
 
 /**
+ * 禁用嵌入实现：Serverless 环境（如 Vercel）无原生依赖时的安全兜底。
+ * 不加载任何模型，embed 返回空（向量记忆停用，记忆退化为摘要+全量）。
+ */
+export class NoopEmbedding implements EmbeddingProvider {
+  name = 'none';
+  dimension = 0;
+  async embed(_texts: string[]): Promise<number[][]> {
+    throw new Error('Embedding 已禁用（EMBEDDING_PROVIDER=none）');
+  }
+}
+
+/**
  * 工厂函数：按名称创建嵌入 provider。
+ * - local: transformers.js 本地模型（需原生依赖，Serverless 不可用）
+ * - openai: OpenAI API（纯 HTTP，Serverless 推荐）
+ * - none: 禁用向量记忆（零依赖兜底）
  */
 export function createEmbeddingProvider(
-  provider: 'local' | 'openai' = 'local',
+  provider: 'local' | 'openai' | 'none' = 'local',
   apiKey?: string,
 ): EmbeddingProvider {
   if (provider === 'openai') {
     if (!apiKey) throw new Error('OpenAI embedding 需要 apiKey');
     return new OpenAIEmbedding(apiKey);
+  }
+  if (provider === 'none') {
+    return new NoopEmbedding();
   }
   return new LocalEmbedding();
 }

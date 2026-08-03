@@ -1,0 +1,27 @@
+# 依赖与构建产物
+node_modules
+.next
+out
+
+# 本地数据（SQLite 会话记录，勿入镜像）
+data
+
+# 环境变量（含 API keys，不入镜像，运行时 -e 传入）
+.env
+.env.local
+.env.*.local
+
+# Git
+.git
+.gitignore
+
+# 文档
+docs/reasonix/plans
+
+# 系统
+.DS_Store
+*.log
+npm-debug.log*
+
+# 模型缓存（构建阶段单独处理）
+model-cache
