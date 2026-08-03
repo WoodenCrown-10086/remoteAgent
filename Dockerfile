@@ -28,7 +28,8 @@ WORKDIR /app
 ENV NODE_ENV=production
 
 # 运行所需的最小系统库（原生模块运行时不需编译工具链）
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+# libgomp1/libstdc++6: onnxruntime 推理必需（缺则 Segmentation fault）
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libgomp1 libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 
 # 从 builder 复制完整 node_modules（含 linux 平台原生模块）
