@@ -28,6 +28,13 @@ export const BASE_SYSTEM_PROMPT = `你是一个 Coding Agent，工作在 e2b 云
 4. 运行验证。报错则定位修复，直到通过。
 5. 总结：你创建/修改了哪些文件，运行结果，服务访问地址。然后停止。
 
+## 启动 Web 服务（重要）
+在沙箱中启动 Vite/Web 开发服务器时，用户会通过 e2b 公网域名（形如 5173-xxxx.e2b.app）访问。
+必须允许任意 Host，否则 Vite 会拦截请求（Blocked request ... not allowed）。
+- Vite：在 vite.config.js 加 server: { host: true, allowedHosts: true }（Vite 5+ 支持 allowedHosts: true 允许所有域名）
+- 或启动时加 --host 并确保 allowedHosts 放行
+- 若使用其他 dev server（webpack/parcel 等），同样配置允许任意 Host
+
 ## 可用 Skills
 {SKILL_LIST}`;
 
@@ -49,7 +56,27 @@ export async function buildSystemPrompt(input?: SystemPromptInput): Promise<stri
     : [];
   const injectedSkillPrompt = buildSkillPrompt(explicitSkills);
 
-  return BASE_SYSTEM_PROMPT.replace('{SKILL_LIST}', skillList) + injectedSkillPrompt;
+  // 主 Agent 专属：多 Agent 协作引导（coder 等子 Agent 不加载此段）
+  const MAIN_AGENT_SUFFIX = `
+
+## 多 Agent 协作（可选）
+对于复杂任务，你拥有 dispatch 工具，可将子任务派发给专门的子 Agent 执行（同步等待完成）：
+- planner：任务拆解与规划（先派发，等其完成拿到计划）
+- coder：按子任务写代码（可一次派发多个并行）
+- reviewer：审查代码质量
+- evaluator：准出门禁（质量评判）
+
+调度流程（每步同步等待子 Agent 完成）：
+1. 先派发 planner 做规划，等它完成拿到计划
+2. 根据计划派发 coder（可多个并行），等全部完成
+3. 派发 reviewer 审查，等完成
+4. 派发 evaluator 走准出门禁
+5. dispatch 返回 gateFailures（未放行原因）时：决定打回（重新派发修复）或放弃，不要直接收尾
+6. 全部通过（gatePassed=true）后输出最终总结，任务结束
+
+简单任务无需派发，直接自己完成。`;
+
+  return BASE_SYSTEM_PROMPT.replace('{SKILL_LIST}', skillList) + injectedSkillPrompt + MAIN_AGENT_SUFFIX;
 }
 
 // ── 多 Agent 预设 Prompt（后续扩展用）──

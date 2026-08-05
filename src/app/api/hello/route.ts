@@ -93,18 +93,31 @@ export async function POST(req: Request) {
   // ── 3. 沙箱（用会话绑定值，前端传入仅兜底） ──
   let sandbox: Sandbox | null = null;
   let sandboxCreated = false;
+  // 沙箱超时（e2b 绝对 TTL，从创建起倒计时，普通 API 调用不续期）：
+  // 到点默认 kill（文件销毁）→ 配置 onTimeout:'pause' 改为自动快照保留（文件不丢）。
+  // 如需超长任务，可加大此值或工具活动时调用 sandbox.setTimeout() 续期。
+  const SANDBOX_TIMEOUT_MS = 3_600_000;
+  const SANDBOX_LIFECYCLE = { onTimeout: 'pause' as const };
   if (boundSandboxId) {
     try {
       sandbox = (await Sandbox.connect(boundSandboxId, {
-        timeoutMs: 300_000,
+        timeoutMs: SANDBOX_TIMEOUT_MS,
         apiKey: e2bApiKey,
       })) as Sandbox;
     } catch {
-      sandbox = await Sandbox.create({ timeoutMs: 300_000, apiKey: e2bApiKey });
+      sandbox = await Sandbox.create({
+        timeoutMs: SANDBOX_TIMEOUT_MS,
+        apiKey: e2bApiKey,
+        lifecycle: SANDBOX_LIFECYCLE,
+      });
       sandboxCreated = true;
     }
   } else {
-    sandbox = await Sandbox.create({ timeoutMs: 300_000, apiKey: e2bApiKey });
+    sandbox = await Sandbox.create({
+      timeoutMs: SANDBOX_TIMEOUT_MS,
+      apiKey: e2bApiKey,
+      lifecycle: SANDBOX_LIFECYCLE,
+    });
     sandboxCreated = true;
   }
 
@@ -134,10 +147,24 @@ export async function POST(req: Request) {
     embeddingProvider,
     maxParallel: 3,
     emit: (data) => subAgentEvents.push(data),
+    gateVerify: async (report) => {
+      // 门禁：检查子 Agent 声明的产物文件真实存在
+      for (const p of report.artifacts) {
+        try {
+          await sandbox.files.read(p);
+        } catch {
+          return { ok: false, reason: `产物不存在: ${p}` };
+        }
+      }
+      return { ok: true };
+    },
   });
   // tools 字面量类型无 dispatch 属性，沿用 memory_search 的 any 断言注入方式
   (tools as any).dispatch = createDispatchTool(
-    (role, task, dependsOn) => orchestrator.dispatch(role, task, dependsOn),
+    async (role, task, dependsOn, taskId) => {
+      // 单任务批量：同步等待子 Agent 完成 + 门禁
+      return orchestrator.dispatchBatch(role, [{ id: taskId, task }], dependsOn);
+    },
   );
 
   // 上下文被压缩时注入记忆检索工具（回忆早期历史）
@@ -172,6 +199,15 @@ export async function POST(req: Request) {
     apiKey,
     agentId: 'main',
     agentRole: 'main',
+    // 主 Agent 生命周期 hooks（验收/错误记录）
+    hooks: {
+      onComplete: async ({ summary }) => {
+        console.log(`[main-agent] 任务完成，摘要: ${summary.slice(0, 200)}`);
+      },
+      onError: ({ error, roundIndex }) => {
+        console.error(`[main-agent] 第 ${roundIndex} 轮出错:`, error.message);
+      },
+    },
     context: {
       onPersist: createPersistCallback(
         currentSessionId,

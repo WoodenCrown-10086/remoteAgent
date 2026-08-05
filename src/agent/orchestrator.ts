@@ -19,6 +19,19 @@ export interface TaskNode {
   retries: number;
 }
 
+/** 每个子 Agent 的结构化报告 */
+export interface AgentReport {
+  taskId: string;
+  role: AgentRoleName;
+  task: string;
+  status: 'passed' | 'failed' | 'pending';   // 完成 Flag
+  summary: string;
+  artifacts: string[];
+  report: string;
+  gatePassed?: boolean;
+  gateReason?: string;
+}
+
 export interface OrchestratorOpts {
   sandbox: Sandbox;
   sessionId: string;
@@ -28,6 +41,8 @@ export interface OrchestratorOpts {
   maxRetries?: number;
   /** 事件发射器（子 Agent 生命周期事件转发到 SSE） */
   emit: (data: Record<string, unknown>) => void;
+  /** 门禁验证脚本：检查产物真实存在/就绪 */
+  gateVerify?: (report: AgentReport) => Promise<{ ok: boolean; reason?: string }>;
 }
 
 export class Orchestrator {
@@ -36,6 +51,9 @@ export class Orchestrator {
   private maxParallel: number;
   private maxRetries: number;
   private seqCounter = 0;
+
+  /** 全局状态集合：taskId → 报告（准出标记） */
+  private agentStates = new Map<string, AgentReport>();
 
   constructor(private opts: OrchestratorOpts) {
     this.maxParallel = opts.maxParallel ?? 3;
@@ -54,6 +72,90 @@ export class Orchestrator {
 
     this.tryRunReady();
     return id;
+  }
+
+  /** 等待指定任务全部到达终态（带超时） */
+  private async waitFor(ids: string[], timeoutMs: number = 600_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    const pending = () => ids.some((id) => {
+      const t = this.tasks.get(id);
+      return t && (t.status === 'pending' || t.status === 'running');
+    });
+    while (pending()) {
+      if (Date.now() > deadline) {
+        for (const id of ids) {
+          const t = this.tasks.get(id);
+          if (t && (t.status === 'pending' || t.status === 'running')) {
+            t.status = 'failed';
+            t.result = '调度超时';
+          }
+        }
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 300));
+      this.tryRunReady();
+    }
+  }
+
+  /** 批量派发：N 个并行子任务 → 同步等待全部完成 → 跑门禁 → 返回聚合结果 */
+  async dispatchBatch(
+    role: AgentRoleName,
+    tasks: Array<{ id?: string; task: string }>,
+    dependsOn: string[] = [],
+  ): Promise<{
+    reports: AgentReport[];
+    gatePassed: boolean;
+    gateFailures: string[];
+  }> {
+    const ids = await Promise.all(
+      tasks.map((t) => this.dispatch(role, t.task, dependsOn, t.id)),
+    );
+    await this.waitFor(ids);
+    const reports = ids.map((id) => {
+      const existing = this.agentStates.get(id);
+      if (existing) return existing;
+      // 兜底：级联失败 / 超时未写报告的任务
+      const t = this.tasks.get(id);
+      return {
+        taskId: id,
+        role: (t?.role ?? 'unknown') as AgentRoleName,
+        task: t?.task ?? '',
+        status: 'failed' as const,
+        summary: t?.result || '任务失败（未产出报告）',
+        artifacts: [],
+        report: t?.result || '任务失败（未产出报告）',
+      };
+    });
+    return this.runGate(reports);
+  }
+
+  /** 门禁：子 Agent 准出标记 + 外部验证脚本 */
+  private async runGate(reports: AgentReport[]): Promise<{
+    reports: AgentReport[];
+    gatePassed: boolean;
+    gateFailures: string[];
+  }> {
+    const failures: string[] = [];
+    for (const r of reports) {
+      if (r.status !== 'passed') {
+        failures.push(`${r.taskId}: Agent 未准出 (${r.status})`);
+        continue;
+      }
+      if (this.opts.gateVerify) {
+        try {
+          const v = await this.opts.gateVerify(r);
+          if (!v.ok) failures.push(`${r.taskId}: ${v.reason || '门禁未通过'}`);
+          r.gatePassed = v.ok;
+          r.gateReason = v.reason;
+        } catch (e: any) {
+          failures.push(`${r.taskId}: 门禁脚本异常 ${e.message}`);
+          r.gatePassed = false;
+        }
+      } else {
+        r.gatePassed = true;
+      }
+    }
+    return { reports, gatePassed: failures.length === 0, gateFailures: failures };
   }
 
   /** 等待全部任务到达终态，返回汇总（带超时保护，默认 10 分钟） */
@@ -162,6 +264,27 @@ export class Orchestrator {
         apiKey: this.opts.apiKey,
         agentId: node.id,
         agentRole: node.role,
+        // 子 Agent 生命周期 hooks：onComplete 记录验收结果供门禁判定
+        hooks: {
+          onComplete: async ({ summary }) => {
+            const report: AgentReport = {
+              taskId: node.id,
+              role: node.role,
+              task: node.task,
+              // 成功路径恒 passed：onComplete 仅在成功流结束时调用（异常走 catch 兜底）；
+              // 若任务已被外部标记 failed（如 waitFor 超时），则如实记录 failed，避免覆盖为 passed
+              status: node.status === 'failed' ? 'failed' : 'passed',
+              summary: summary.slice(0, 200),
+              artifacts: [],
+              report: summary,
+            };
+            this.agentStates.set(node.id, report);
+            node.result = `任务 ${node.id} 完成: ${summary.slice(0, 200)}`;
+          },
+          onError: ({ error }) => {
+            console.error(`[orchestrator] ${node.id} 出错:`, error.message);
+          },
+        },
       });
 
       const reader = stream.getReader();
@@ -181,8 +304,14 @@ export class Orchestrator {
         }
       }
 
+      // 若已被 waitFor 超时标记为 failed，则不翻转（防止超时后后台完成写 passed）
+      if ((node as { status: TaskStatus }).status === 'failed') {
+        this.opts.emit({ type: 'agent_finish', agentId: node.id, agentRole: node.role, status: 'failed', error: node.result || '调度超时' });
+        return;
+      }
       node.status = 'passed';
-      node.result = `任务 ${node.id} 完成`;
+      // 若 hooks.onComplete 已写入验收结果则保留，否则给默认值
+      node.result = node.result || `任务 ${node.id} 完成`;
       this.opts.emit({ type: 'agent_finish', agentId: node.id, agentRole: node.role, status: 'passed' });
     } catch (e: any) {
       if (node.retries < this.maxRetries) {
@@ -194,6 +323,18 @@ export class Orchestrator {
       } else {
         node.status = 'failed';
         node.result = e.message || '执行失败';
+        // 兜底：异常路径也写报告（避免 dispatchBatch 拿不到）
+        if (!this.agentStates.has(node.id)) {
+          this.agentStates.set(node.id, {
+            taskId: node.id,
+            role: node.role,
+            task: node.task,
+            status: 'failed',
+            summary: node.result || '执行失败',
+            artifacts: [],
+            report: node.result || '执行失败',
+          });
+        }
         this.opts.emit({ type: 'agent_finish', agentId: node.id, agentRole: node.role, status: 'failed', error: node.result });
       }
     } finally {

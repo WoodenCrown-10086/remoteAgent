@@ -1,5 +1,4 @@
-import { streamText, stepCountIs } from 'ai';
-import { createDeepseek } from '@/lib/deepseek';
+import { runAgentLoop, type AgentLifecycleHooks } from './agent-loop';
 import type { AgentRunInput, StreamContext, SSEEvent } from './types';
 import { EVENT_TYPE_MAP } from './types';
 
@@ -21,23 +20,16 @@ export interface RunAgentParams {
   agentId?: string;
   /** Agent 角色 */
   agentRole?: string;
+  /** 生命周期 hooks（透传给 runAgentLoop） */
+  hooks?: AgentLifecycleHooks;
 }
 
 export function runAgent(params: RunAgentParams): ReadableStream {
-  const { input, messages, systemPrompt, tools, context, maxSteps = 100, apiKey, agentId, agentRole } = params;
+  const { input, messages, systemPrompt, tools, context, maxSteps = 100, apiKey, agentId, agentRole, hooks } = params;
   const { sandbox, sessionId, startSequence, sandboxCreated, meta } = input;
 
   const encoder = new TextEncoder();
-  let stepIndex = 0;
   let sequence = startSequence;
-
-  // ── 类型映射 + 角色推断 ──
-  const mapEventType = (rawType: string) => EVENT_TYPE_MAP[rawType] || rawType;
-  const mapRole = (type: string): 'user' | 'assistant' | 'system' => {
-    if (type === 'user') return 'user';
-    if (type === 'error' || type === 'done') return 'system';
-    return 'assistant';
-  };
 
   return new ReadableStream({
     async start(controller) {
@@ -72,119 +64,18 @@ export function runAgent(params: RunAgentParams): ReadableStream {
           ...(meta || {}),
         });
 
-        // ── AI SDK streamText ──
-        const result = streamText({
-          model: createDeepseek(apiKey)('deepseek-v4-flash'),
-          system: systemPrompt,
-          messages,
+        // 委托给轮次循环控制器（无 hooks = 行为等价）
+        await runAgentLoop({
+          systemPrompt,
+          initialMessages: messages,
           tools,
-          stopWhen: stepCountIs(maxSteps),
+          hooks,
+          maxStepsPerRound: maxSteps,
+          emit: send,
+          apiKey,
+          agentId,
+          agentRole,
         });
-
-        // ── 流事件处理 ──
-        for await (const part of result.stream) {
-          switch (part.type) {
-            case 'text-delta':
-              send({ type: 'text', content: (part as any).text });
-              break;
-
-            case 'reasoning-start':
-              send({ type: 'reasoning_start' });
-              break;
-
-            case 'reasoning-delta':
-              // 思考内容独立事件（前端折叠显示，不混入正式回复）
-              send({ type: 'reasoning_delta', content: (part as any).text });
-              break;
-
-            case 'reasoning-end':
-              send({ type: 'reasoning_end' });
-              break;
-
-            case 'tool-call': {
-              const tc = part as any;
-              send({
-                type: 'tool_call',
-                toolCallId: tc.toolCallId,
-                toolName: tc.toolName,
-                args: tc.input,
-              });
-              break;
-            }
-
-            case 'tool-result': {
-              const tr = part as any;
-              send({
-                type: 'tool_result',
-                toolCallId: tr.toolCallId,
-                toolName: tr.toolName,
-                result: tr.output,
-              });
-              break;
-            }
-
-            case 'tool-error': {
-              const te = part as any;
-              send({
-                type: 'tool_error',
-                toolCallId: te.toolCallId,
-                toolName: te.toolName,
-                error: String(te.error),
-              });
-              break;
-            }
-
-            case 'start-step':
-              stepIndex++;
-              send({ type: 'step_start', index: stepIndex });
-              break;
-
-            case 'finish-step': {
-              const fs = part as any;
-              send({
-                type: 'step_finish',
-                index: stepIndex,
-                finishReason: fs.finishReason,
-              });
-              break;
-            }
-
-            case 'finish': {
-              const f = part as any;
-              send({
-                type: 'done',
-                finishReason: f.finishReason,
-                usage: f.totalUsage,
-              });
-              break;
-            }
-
-            case 'error':
-              send({ type: 'error', error: String((part as any).error) });
-              break;
-
-            // 明确忽略的事件
-            case 'text-start':
-            case 'text-end':
-            case 'tool-input-start':
-            case 'tool-input-delta':
-            case 'tool-input-end':
-            case 'source':
-            case 'file':
-            case 'start':
-            case 'abort':
-            case 'raw':
-              break;
-
-            default:
-              console.log(
-                '[stream] 未知事件:',
-                part.type,
-                JSON.stringify(part).slice(0, 200),
-              );
-              break;
-          }
-        }
 
         controller.close();
         // 通知回调：会话状态/沙箱绑定在此落库（route 层 onFinish）

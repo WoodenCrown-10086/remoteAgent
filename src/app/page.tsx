@@ -10,7 +10,7 @@ import type { MessageCardItem } from '@/components/chat/message-card';
 import type { ToolCallCardProps } from '@/components/chat/tool-call-card';
 import AgentStatusBar, { AgentStatus } from '@/components/agent-status-bar';
 import { apiFetch } from '@/lib/api';
-import { CheckCircle2, Loader2, Bot } from 'lucide-react';
+import { CheckCircle2, Loader2, Bot, ChevronDown } from 'lucide-react';
 
 // ── 类型 ──
 
@@ -78,6 +78,18 @@ export default function Home() {
   // reasoning 流式累积（reasoning_start → delta → end 拼成完整思考）
   const reasoningRef = useRef('');
   const virtuosoRef = useRef<VirtuosoHandle>(null);
+  // 是否在聊天区底部（用户滚动离开底部时显示"回到底部"箭头）
+  const [atBottom, setAtBottom] = useState(true);
+
+  // 强制回到底部（进入会话/点击箭头）
+  const scrollToBottom = useCallback(() => {
+    // Virtuoso 支持 index: 'LAST' 定位最后一项
+    virtuosoRef.current?.scrollToIndex({
+      index: 'LAST',
+      align: 'end',
+      behavior: 'smooth',
+    });
+  }, []);
 
   // ── 会话状态 ──
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -133,6 +145,14 @@ export default function Home() {
     setHistoryLoading(true);
     try {
       const res = await fetch(`/api/sessions/${sid}/messages`);
+      if (res.status === 404) {
+        // 会话不存在（可能被删除/DB 重建）→ 清理失效 sessionId，友好回退
+        console.warn(`[history] 会话 ${sid.slice(0, 8)} 不存在，清理本地缓存`);
+        localStorage.removeItem('currentSessionId');
+        setSessionId(null);
+        setActivity([]);
+        return;
+      }
       if (!res.ok) throw new Error('加载失败');
       const data = await res.json();
       const msgs: Array<{
@@ -157,6 +177,9 @@ export default function Home() {
 
       setActivity(entries);
       setSessionId(sid);
+
+      // 加载历史后定位到底部（等 Virtuoso 渲染完成）
+      setTimeout(() => scrollToBottom(), 80);
 
       // 从会话记录恢复关联的沙箱（刷新页面后沙箱 ID 只存在 DB 里）
       // Drizzle 返回 camelCase: sandboxId（DB 列名 sandbox_id）
@@ -732,14 +755,27 @@ export default function Home() {
                 </p>
               </div>
             ) : (
-              <Virtuoso
-                ref={virtuosoRef}
-                data={virtuosoData}
-                itemContent={renderVirtuosoItem}
-                followOutput="auto"
-                atBottomThreshold={120}
-                className="h-full"
-              />
+              <div className="relative h-full">
+                <Virtuoso
+                  ref={virtuosoRef}
+                  data={virtuosoData}
+                  itemContent={renderVirtuosoItem}
+                  followOutput="auto"
+                  atBottomThreshold={120}
+                  atBottomStateChange={(isAtBottom) => setAtBottom(isAtBottom)}
+                  className="h-full"
+                />
+                {/* 用户滚动离开底部时显示"回到底部"箭头 */}
+                {!atBottom && (
+                  <button
+                    onClick={scrollToBottom}
+                    className="absolute bottom-3 left-1/2 -translate-x-1/2 w-9 h-9 rounded-full bg-blue-600 text-white shadow-lg flex items-center justify-center hover:bg-blue-700 transition-all active:scale-95 z-10"
+                    title="回到底部"
+                  >
+                    <ChevronDown size={18} />
+                  </button>
+                )}
+              </div>
             )}
           </div>
 
