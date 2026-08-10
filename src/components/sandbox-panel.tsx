@@ -1,20 +1,9 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { apiFetch } from '@/lib/api';
-import {
-  Folder,
-  FolderOpen,
-  File,
-  RefreshCw,
-  Globe,
-  Terminal,
-  ChevronRight,
-  ChevronDown,
-  X,
-  Loader2,
-  ExternalLink,
-} from 'lucide-react';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
+import { X, Folder, FolderOpen, File, RefreshCw, Globe, Terminal, ChevronRight, ChevronDown, Loader2, ExternalLink } from 'lucide-react';
 
 // ── 类型 ──
 
@@ -113,11 +102,19 @@ function TreeNode({
 export default function SandboxPanel({
   sandboxId,
   terminalLines = [],
+  onSandboxExpired,
 }: {
   sandboxId: string | null;
   terminalLines?: TerminalEntry[];
+  onSandboxExpired?: () => void;
 }) {
   const [activeTab, setActiveTab] = useState<'files' | 'preview' | 'terminal'>('files');
+  const [sandboxExpired, setSandboxExpired] = useState(false);
+  // 用 ref 保存过期回调，避免流式更新时父组件内联函数变化导致 effect 重跑
+  const expiredRef = useRef(onSandboxExpired);
+  useEffect(() => {
+    expiredRef.current = onSandboxExpired;
+  }, [onSandboxExpired]);
 
   // 文件浏览状态
   const [fileTree, setFileTree] = useState<FileNode[]>([]);
@@ -150,12 +147,18 @@ export default function SandboxPanel({
         const res = await apiFetch(
           `/api/sandbox?action=files&sandboxId=${sandboxId}&dir=/home/user`,
         );
+        const body = await res.json().catch(() => ({}));
         if (!res.ok) {
-          const body = await res.json().catch(() => ({}));
+          if (body.expired || res.status === 410) {
+            if (!cancelled) {
+              setSandboxExpired(true);
+              expiredRef.current?.();
+            }
+            return;
+          }
           throw new Error(body.error || `HTTP ${res.status}`);
         }
-        const data = await res.json();
-        if (!cancelled) setFileTree(data.tree || []);
+        if (!cancelled) setFileTree(body.tree || []);
       } catch (err: unknown) {
         if (!cancelled) console.error('加载文件树失败:', err);
       } finally {
@@ -240,6 +243,23 @@ export default function SandboxPanel({
     });
   }, []);
 
+  // ── 沙箱已过期（被 e2b 回收） ──
+  if (sandboxExpired) {
+    return (
+      <div className="flex items-center justify-center h-full text-gray-400 text-sm">
+        <div className="text-center px-6">
+          <X size={32} className="mx-auto mb-2 opacity-30" />
+          <p className="text-gray-500 font-medium mb-1">沙箱已过期</p>
+          <p className="text-xs text-gray-400">
+            该沙箱因长时间未使用已被回收。
+            <br />
+            请重新发送任务以创建新沙箱。
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   // ── 无沙箱状态 ──
   if (!sandboxId) {
     return (
@@ -254,32 +274,31 @@ export default function SandboxPanel({
 
   return (
     <div className="h-full flex flex-col bg-white">
-      {/* Tab 栏 */}
-      <div className="flex border-b shrink-0">
-        {[
-          { key: 'files', label: '文件', icon: Folder },
-          { key: 'preview', label: '预览', icon: Globe },
-          { key: 'terminal', label: '终端', icon: Terminal },
-        ].map(({ key, label, icon: Icon }) => (
-          <button
-            key={key}
-            onClick={() => setActiveTab(key as typeof activeTab)}
-            className={`flex items-center gap-1.5 px-3 py-2 text-xs font-medium transition-colors border-b-2 -mb-px ${
-              activeTab === key
-                ? 'border-blue-500 text-blue-600'
-                : 'border-transparent text-gray-500 hover:text-gray-700'
-            }`}
-          >
-            <Icon size={14} />
-            {label}
-          </button>
-        ))}
-      </div>
+      {/* Tab 栏（shadcn Tabs） */}
+      <Tabs
+        value={activeTab}
+        onValueChange={(v) =>
+          setActiveTab((v as 'files' | 'preview' | 'terminal') || 'files')
+        }
+        className="flex h-full flex-col gap-0"
+      >
+        <TabsList
+          variant="line"
+          className="h-9 w-full justify-start rounded-none border-b bg-transparent px-1"
+        >
+          <TabsTrigger value="files">
+            <Folder size={14} /> 文件
+          </TabsTrigger>
+          <TabsTrigger value="preview">
+            <Globe size={14} /> 预览
+          </TabsTrigger>
+          <TabsTrigger value="terminal">
+            <Terminal size={14} /> 终端
+          </TabsTrigger>
+        </TabsList>
 
-      {/* 内容区 */}
-      <div className="flex-1 overflow-hidden">
         {/* ═══ 文件浏览器 ═══ */}
-        {activeTab === 'files' && (
+        <TabsContent value="files" className="min-h-0 flex-1">
           <div className="h-full flex flex-col">
             {/* 工具栏 */}
             <div className="flex items-center gap-2 px-2 py-1.5 border-b bg-gray-50 shrink-0">
@@ -371,10 +390,10 @@ export default function SandboxPanel({
               </div>
             </div>
           </div>
-        )}
+        </TabsContent>
 
         {/* ═══ 端口预览 ═══ */}
-        {activeTab === 'preview' && (
+        <TabsContent value="preview" className="min-h-0 flex-1">
           <div className="h-full flex flex-col">
             {/* 端口输入 */}
             <div className="flex items-center gap-2 px-3 py-2 border-b bg-gray-50 shrink-0">
@@ -469,10 +488,10 @@ export default function SandboxPanel({
               ) : null}
             </div>
           </div>
-        )}
+        </TabsContent>
 
         {/* ═══ 终端输出 ═══ */}
-        {activeTab === 'terminal' && (
+        <TabsContent value="terminal" className="min-h-0 flex-1">
           <div className="h-full flex flex-col bg-gray-900">
             <div className="flex items-center gap-2 px-3 py-1.5 border-b border-gray-700 shrink-0">
               <Terminal size={12} className="text-green-400" />
@@ -512,8 +531,8 @@ export default function SandboxPanel({
               )}
             </div>
           </div>
-        )}
-      </div>
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

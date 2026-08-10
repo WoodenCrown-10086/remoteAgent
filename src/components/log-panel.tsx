@@ -104,7 +104,7 @@ export default function LogPanel({ modelLogs }: { modelLogs: ModelLog[] }) {
   const clearSys = () => setServerLogs([]);
 
   return (
-    <div className="w-1/3 bg-gray-900 text-gray-200 flex flex-col shrink-0 min-w-0">
+    <div className="h-full w-full bg-gray-900 text-gray-200 flex flex-col shrink-0 min-w-0 overflow-hidden">
       {/* ── 上半：模型执行日志（高度减半） ── */}
       <div className="flex-1 flex flex-col min-h-0">
         <div className="px-3 py-2 border-b border-gray-700 text-xs font-semibold text-gray-400 uppercase tracking-wide flex items-center gap-1.5 shrink-0">

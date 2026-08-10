@@ -71,7 +71,6 @@ export async function GET(req: Request) {
       timeoutMs: 30_000,
       apiKey: e2bApiKey,
     })) as Sandbox;
-
     // ── 扁平文件列表（find 命令，兼容旧版） ──
     if (action === 'list') {
       const result = await sandbox.commands.run(
@@ -153,9 +152,13 @@ export async function GET(req: Request) {
   } catch (error: unknown) {
     console.error(`[sandbox] action=${action} sandboxId=${sandboxId} 失败:`, error);
     const msg = error instanceof Error ? error.message : '操作失败';
+    // 识别沙箱过期/被回收：e2b 对暂停超时的沙箱会报 not found
+    const expired =
+      /not found|does not exist|expired|not exist/i.test(msg) &&
+      /sandbox|paused|terminated/i.test(msg);
     return Response.json(
-      { error: msg, action },
-      { status: 500 },
+      { error: msg, action, expired: expired || undefined },
+      { status: expired ? 410 : 500 },
     );
   }
 }
