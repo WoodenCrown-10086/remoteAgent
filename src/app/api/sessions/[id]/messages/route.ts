@@ -1,7 +1,7 @@
 import { initDb, getSession, getSessionMessages } from '@/db/db';
 
 export async function GET(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
   await initDb();
@@ -12,10 +12,24 @@ export async function GET(
     return Response.json({ error: '会话不存在' }, { status: 404 });
   }
 
-  const messages = await getSessionMessages(id);
+  // 分页参数：?limit=N&before=<sequence>
+  // - 省略 limit → 全量加载（兼容旧行为）
+  // - before 为游标（已加载最早消息的 sequence），取比它更早的一页
+  const url = new URL(req.url);
+  const limitRaw = url.searchParams.get('limit');
+  const beforeRaw = url.searchParams.get('before');
+  const limit = limitRaw ? parseInt(limitRaw, 10) : 0;
+  const beforeSeq = beforeRaw ? parseInt(beforeRaw, 10) : undefined;
+
+  const { messages, hasMore } = await getSessionMessages(id, {
+    limit: limit > 0 ? limit : undefined,
+    beforeSeq:
+      beforeSeq !== undefined && !Number.isNaN(beforeSeq) ? beforeSeq : undefined,
+  });
 
   return Response.json({
     session,
+    hasMore,
     messages: messages.map((m) => ({
       ...m,
       metadata: m.metadata ? JSON.parse(m.metadata) : null,

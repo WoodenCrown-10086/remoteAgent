@@ -1,5 +1,5 @@
 'use client';
-import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
+import { useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback } from 'react';
 import { Virtuoso, VirtuosoHandle } from 'react-virtuoso';
 import SandboxPanel from '@/components/sandbox-panel';
 import SessionSidebar from '@/components/session-sidebar';
@@ -7,6 +7,7 @@ import ApiKeySettings from '@/components/api-key-settings';
 import LogPanel from '@/components/log-panel';
 import RightStatusBar, { PanelKey } from '@/components/right-status-bar';
 import MessageCard from '@/components/chat/message-card';
+import ChatInput from '@/components/chat-input';
 import type { MessageCardItem } from '@/components/chat/message-card';
 import type { ToolCallCardProps } from '@/components/chat/tool-call-card';
 import AgentStatusBar, { AgentStatus } from '@/components/agent-status-bar';
@@ -14,7 +15,6 @@ import { apiFetch } from '@/lib/api';
 import { Badge } from '@/components/ui/badge';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Progress } from '@/components/ui/progress';
-import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { CheckCircle2, Loader2, Bot, ChevronDown, Activity, X } from 'lucide-react';
@@ -64,6 +64,58 @@ interface SessionItem {
   updatedAt: string;
 }
 
+/** 历史消息行（来自 /api/sessions/[id]/messages） */
+interface HistoryMsg {
+  id: string;
+  role?: string;
+  type: string;
+  content?: string | null;
+  metadata?: Record<string, unknown> | null;
+  step_index?: number;
+  sequence: number;
+  created_at: string;
+}
+
+/** 按气泡内容粗估高度（供 Virtuoso 初始 size tree；真实测量会替换估算值） */
+function estimateBubbleHeight(bubble: ChatBubble): number {
+  let h = 40; // 容器 padding + 时间行
+  for (const item of bubble.items) {
+    if (item.type === 'text' && item.content) {
+      const breaks = (item.content.match(/\n/g) || []).length;
+      const lines = Math.ceil(item.content.length / 44) + breaks;
+      // 合并后的大 markdown 消息可能很高，上限放宽到 600
+      h += Math.min(lines * 22 + 16, 600);
+    } else if (item.type === 'reasoning' && item.content) {
+      h += 34; // reasoning 折叠行
+    } else if (item.type === 'tool') {
+      h += 64; // 工具卡片
+    }
+  }
+  return Math.min(Math.max(h, 60), 700);
+}
+
+/** DB 消息行 → activity 条目（loadHistory / loadOlder 共用） */
+function msgsToEntries(msgs: HistoryMsg[]): ActivityEntry[] {
+  return msgs.map((m) => {
+    // 兼容旧数据：早期版本用户消息 type 也是 'text'，靠 role 区分
+    const type =
+      m.role === 'user' && m.type === 'text'
+        ? 'user'
+        : (m.type as ActivityEntry['type']);
+    return {
+      time: new Date(m.created_at).toLocaleTimeString(),
+      type,
+      content: m.content ?? undefined,
+      toolName: m.metadata?.toolName as string | undefined,
+      toolArgs: m.metadata?.toolArgs as Record<string, unknown> | undefined,
+      toolResult: m.metadata?.toolResult,
+      stepIndex: (m.step_index ?? m.metadata?.stepIndex) as number | undefined,
+      finishReason: m.metadata?.finishReason as string | undefined,
+      error: m.metadata?.error as string | undefined,
+    };
+  });
+}
+
 // ── 主组件（纯 CSR：由 page.tsx 通过 dynamic ssr:false 加载） ──
 
 export default function AgentApp() {
@@ -82,13 +134,12 @@ export default function AgentApp() {
   // 是否在聊天区底部（用户滚动离开底部时显示"回到底部"箭头）
   const [atBottom, setAtBottom] = useState(true);
 
-  // 强制回到底部（进入会话/点击箭头）
-  const scrollToBottom = useCallback(() => {
-    // Virtuoso 支持 index: 'LAST' 定位最后一项
+  // 强制回到底部（进入会话/点击箭头；首次加载用 auto 无动画，避免跳动）
+  const scrollToBottom = useCallback((smooth = true) => {
     virtuosoRef.current?.scrollToIndex({
       index: 'LAST',
       align: 'end',
-      behavior: 'smooth',
+      behavior: smooth ? 'smooth' : 'auto',
     });
   }, []);
 
@@ -98,6 +149,16 @@ export default function AgentApp() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [sidebarRefreshKey, setSidebarRefreshKey] = useState(0);
   const [agentStatuses, setAgentStatuses] = useState<AgentStatus[]>([]);
+
+  // ── 历史消息分页（向上加载更早消息） ──
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [hasMoreHistory, setHasMoreHistory] = useState(true);
+  const [firstItemIndex, setFirstItemIndex] = useState(0); // Virtuoso 无限列表虚拟索引
+  const oldestSeqRef = useRef<number | null>(null); // 已加载最早消息的 sequence（游标）
+  const bubbleCountRef = useRef(0); // 上一次 bubbles 数量（计算向上加载新增数）
+  const firstItemBaseRef = useRef(0); // 虚拟索引基准（首次加载后固定）
+  const pendingOlderRef = useRef(false); // 标记本次 bubbles 增长来自向上加载（unshift），区分追加新消息
+  const [listVisible, setListVisible] = useState(true); // 默认可见；仅首次加载定位期间短暂隐藏
 
   // ── API Key 状态（首渲染与 SSR 一致，挂载后恢复） ──
   const [apiKey, setApiKey] = useState('');
@@ -141,7 +202,7 @@ export default function AgentApp() {
     }
   }, [sessionId]);
 
-  // ── 从 DB 加载历史消息 → 转换为 activity ──
+  // ── 加载历史消息（全量加载，兼容旧分片数据；不做 limit 截断，避免把一条回复切碎） ──
   const loadHistory = useCallback(async (sid: string) => {
     setHistoryLoading(true);
     try {
@@ -156,31 +217,22 @@ export default function AgentApp() {
       }
       if (!res.ok) throw new Error('加载失败');
       const data = await res.json();
-      const msgs: Array<{
-        type: string;
-        content?: string;
-        metadata?: Record<string, unknown>;
-        step_index?: number;
-        created_at: string;
-      }> = data.messages;
+      const msgs = (data.messages || []) as HistoryMsg[];
 
-      const entries: ActivityEntry[] = msgs.map((m) => ({
-        time: new Date(m.created_at).toLocaleTimeString(),
-        type: m.type as ActivityEntry['type'],
-        content: m.content,
-        toolName: m.metadata?.toolName as string | undefined,
-        toolArgs: m.metadata?.toolArgs as Record<string, unknown> | undefined,
-        toolResult: m.metadata?.toolResult,
-        stepIndex: (m.step_index ?? m.metadata?.stepIndex) as number | undefined,
-        finishReason: m.metadata?.finishReason as string | undefined,
-        error: m.metadata?.error as string | undefined,
-      }));
+      // 全量数据：普通列表模式（firstItemIndex=0），无更多分页
+      oldestSeqRef.current = null;
+      setHasMoreHistory(false);
+      bubbleCountRef.current = 0;
+      firstItemBaseRef.current = 0;
+      setFirstItemIndex(0);
 
-      setActivity(entries);
+      setActivity(msgsToEntries(msgs));
       setSessionId(sid);
 
-      // 加载历史后定位到底部（等 Virtuoso 渲染完成）
-      setTimeout(() => scrollToBottom(), 80);
+      // 先渲染（隐藏），等 Virtuoso 布局完成后再定位底部并显示——用户全程看不到跳动
+      // 定位由下方「首次定位 effect」负责（确保 Virtuoso 已挂载 + 布局完成）
+      setHistoryLoading(false);
+      setListVisible(false);
 
       // 从会话记录恢复关联的沙箱（刷新页面后沙箱 ID 只存在 DB 里）
       // Drizzle 返回 camelCase: sandboxId（DB 列名 sandbox_id）
@@ -193,7 +245,35 @@ export default function AgentApp() {
     } finally {
       setHistoryLoading(false);
     }
-  }, [scrollToBottom]);
+  }, []);
+
+  // ── 向上加载更早的 50 条消息（Virtuoso 滚动接近顶部时触发） ──
+  const loadOlder = useCallback(async () => {
+    if (!sessionId || loadingOlder || !hasMoreHistory) return;
+    if (oldestSeqRef.current == null) return; // 无游标（空会话）
+
+    setLoadingOlder(true);
+    try {
+      const res = await fetch(
+        `/api/sessions/${sessionId}/messages?limit=50&before=${oldestSeqRef.current}`,
+      );
+      if (!res.ok) throw new Error('加载失败');
+      const data = await res.json();
+      const olderMsgs = (data.messages || []) as HistoryMsg[];
+      if (olderMsgs.length > 0) {
+        const olderEntries = msgsToEntries(olderMsgs);
+        // 更早的消息插到最前面（时间正序）；标记来源供 firstItemIndex 同步
+        pendingOlderRef.current = true;
+        setActivity((prev) => [...olderEntries, ...prev]);
+        oldestSeqRef.current = olderMsgs[0].sequence;
+      }
+      setHasMoreHistory(!!data.hasMore);
+    } catch (e) {
+      console.error('加载更早消息失败', e);
+    } finally {
+      setLoadingOlder(false);
+    }
+  }, [sessionId, loadingOlder, hasMoreHistory]);
 
   // ── 会话操作 ──
   const handleSessionSelect = useCallback(
@@ -241,6 +321,14 @@ export default function AgentApp() {
     setSummary('');
     setLogs([]);
     setTerminalLines([]);
+    // 重置分页状态
+    setLoadingOlder(false);
+    setHasMoreHistory(true);
+    setFirstItemIndex(0);
+    oldestSeqRef.current = null;
+    bubbleCountRef.current = 0;
+    firstItemBaseRef.current = 0;
+    // 注意：不重置 listVisible——新会话保持可见；加载历史时 loadHistory 会自行隐藏再显示
   }, []);
 
   const handleSessionDelete = useCallback(
@@ -347,6 +435,17 @@ export default function AgentApp() {
         continue;
       }
 
+      // 兼容旧数据：早期版本无 'step' 标记，孤立 assistant 内容（text/reasoning/tool_call）
+      // 自动创建 assistant 气泡，避免被丢弃
+      if (
+        !currentBubble &&
+        (entry.type === 'text' ||
+          entry.type === 'reasoning' ||
+          entry.type === 'tool_call')
+      ) {
+        currentBubble = { role: 'assistant', time: entry.time, items: [] };
+      }
+
       if (!currentBubble) continue;
 
       if (entry.type === 'text') {
@@ -424,6 +523,58 @@ export default function AgentApp() {
     else if (bubbles.length > 0) items.push({ type: 'done' });
     return items;
   }, [bubbles, loading]);
+
+  // ── 初始高度估算（与 virtuosoData 同序；消除测量滞后导致的滚动白屏） ──
+  const heightEstimates = useMemo(
+    () =>
+      virtuosoData.map((item) => {
+        if (item.type === 'bubble' && item.bubble)
+          return estimateBubbleHeight(item.bubble);
+        if (item.type === 'loading') return 56;
+        if (item.type === 'done') return 36;
+        return 50;
+      }),
+    [virtuosoData],
+  );
+
+  // ── bubbles 数量变化 → 同步 Virtuoso 虚拟索引（防止向上加载时滚动跳动） ──
+  // 原理：新消息插到 data 头部时，把 firstItemIndex 减小同样的量，
+  // Virtuoso 按虚拟索引保持各 item 的屏幕位置不变。
+  // 基准由 loadHistory 预置（100000），此处只处理"后续向上加载"的新增部分。
+  // ── bubbles 数量变化 → 同帧同步 Virtuoso 虚拟索引（防止向上加载时滚动跳动） ──
+  // useLayoutEffect：在浏览器 paint 前完成 firstItemIndex 调整，与 data 更新同一帧提交，
+  // Virtuoso 据此保持视口内容不动（官方要求 firstItemIndex 与 data 同步更新）。
+  // 仅"向上加载"（unshift 头部）才减小；新消息追加（push 尾部）不调整。
+  useLayoutEffect(() => {
+    const count = bubbles.length;
+    const prevCount = bubbleCountRef.current;
+    if (prevCount > 0) {
+      const added = count - prevCount;
+      if (added > 0 && pendingOlderRef.current) {
+        setFirstItemIndex((prev) => Math.max(0, prev - added));
+      }
+    }
+    pendingOlderRef.current = false;
+    bubbleCountRef.current = count;
+  }, [bubbles]);
+
+  // ── 首次加载完成后定位到底部并显示（确保 Virtuoso 已挂载且布局完成） ──
+  // listVisible=false 期间列表透明；定位完成后才显示，用户全程看不到跳动
+  useEffect(() => {
+    if (listVisible) return; // 已显示（新会话等），无需定位
+    if (bubbles.length === 0) return; // 数据未就绪
+    const raf = requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        virtuosoRef.current?.scrollToIndex({
+          index: 'LAST',
+          align: 'end',
+          behavior: 'auto',
+        });
+        setListVisible(true);
+      });
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [listVisible, firstItemIndex, bubbles.length]);
 
   const addTerminal = (text: string, type: TerminalLine['type'] = 'info') => {
     const time = new Date().toLocaleTimeString();
@@ -669,6 +820,9 @@ export default function AgentApp() {
   };
 
   // ── Virtuoso item 渲染 ──
+  // 顶部 Header：固定空占位，向上加载全程无感（数据到位后由 firstItemIndex 机制无感插入）
+  const OlderLoader = useCallback(() => <div className="h-2" />, []);
+
   const renderVirtuosoItem = useCallback(
     (_index: number, item: VirtuosoItem) => {
       if (item.type === 'loading') {
@@ -805,11 +959,45 @@ export default function AgentApp() {
                 </p>
               </div>
             ) : (
-              <div className="relative h-full">
+              <div className={`relative h-full ${listVisible ? '' : 'opacity-0'}`}>
                 <Virtuoso
                   ref={virtuosoRef}
                   data={virtuosoData}
                   itemContent={renderVirtuosoItem}
+                  heightEstimates={heightEstimates}
+                  increaseViewportBy={{ top: 200, bottom: 250 }}
+                  minOverscanItemCount={{ top: 5, bottom: 10 }}
+                  skipAnimationFrameInResizeObserver
+                  scrollSeekConfiguration={{
+                    enter: (velocity) => Math.abs(velocity) > 600,
+                    exit: (velocity) => Math.abs(velocity) < 150,
+                  }}
+                  components={{
+                    Header: OlderLoader,
+                    ScrollSeekPlaceholder: ({ height }) => (
+                      <div style={{ height: height ?? 80 }} />
+                    ),
+                  }}
+                  firstItemIndex={firstItemIndex || 0}
+                  computeItemKey={(index, item) => {
+                    // 显式稳定 key，避免 firstItemIndex 为 undefined 时产生 NaN key
+                    if (item.type === 'bubble' && item.bubble !== undefined) {
+                      return item.bubbleIndex ?? index;
+                    }
+                    if (item.type === 'loading') return 'x-loading';
+                    return 'x-done';
+                  }}
+                  initialTopMostItemIndex={
+                    firstItemIndex > 0 && bubbles.length > 0
+                      ? { index: 'LAST', align: 'end' }
+                      : undefined
+                  }
+                  rangeChanged={({ startIndex }) => {
+                    // startIndex 为虚拟索引；距已加载顶部（firstItemIndex）30 条内时预加载更早消息
+                    if (firstItemIndex > 0 && startIndex - firstItemIndex <= 30) {
+                      loadOlder();
+                    }
+                  }}
                   followOutput="auto"
                   atBottomThreshold={120}
                   atBottomStateChange={(isAtBottom) => setAtBottom(isAtBottom)}
@@ -819,7 +1007,7 @@ export default function AgentApp() {
                   <Button
                     variant="default"
                     size="icon"
-                    onClick={scrollToBottom}
+                    onClick={() => scrollToBottom()}
                     className="absolute bottom-3 left-1/2 z-10 -translate-x-1/2 rounded-full shadow-lg"
                     title="回到底部"
                   >
@@ -830,45 +1018,15 @@ export default function AgentApp() {
             )}
           </div>
 
-          {/* 输入区 */}
-          <div className="shrink-0 border-t bg-white p-3">
-            <Textarea
-              rows={3}
-              placeholder="输入任务描述，Enter 发送，Shift+Enter 换行"
-              value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  if (!loading) callApi(false);
-                }
-              }}
-              className="resize-none"
-            />
-            <div className="mt-2 flex items-center gap-2">
-              <Button
-                onClick={() => callApi(false)}
-                disabled={loading || !prompt.trim()}
-              >
-                {loading ? '执行中...' : '发送'}
-              </Button>
-              <Button
-                variant="secondary"
-                onClick={() => callApi(true)}
-                disabled={loading || !prompt.trim()}
-              >
-                发送后销毁
-              </Button>
-              {loading && (
-                <Button variant="destructive" onClick={stopAgent}>
-                  中止
-                </Button>
-              )}
-              <span className="ml-auto text-xs text-muted-foreground">
-                {summary}
-              </span>
-            </div>
-          </div>
+          {/* 输入区（独立 memo 组件，打字不重渲染巨型树） */}
+          <ChatInput
+            value={prompt}
+            loading={loading}
+            summary={summary}
+            onChange={setPrompt}
+            onSend={callApi}
+            onStop={stopAgent}
+          />
 
         </div>
 

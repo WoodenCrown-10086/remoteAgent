@@ -371,7 +371,7 @@ export async function buildContext(
   // 1. 加载候选消息：有摘要则只取断点之后的新消息
   const dbMessages = summarySeq >= 0
     ? await getSessionMessagesAfterSeq(sessionId, summarySeq)
-    : await getSessionMessages(sessionId);
+    : (await getSessionMessages(sessionId)).messages;
   const historyMessages = convertDbToCoreMessages(dbMessages.map(parse));
 
   // 2. 附加当前用户消息

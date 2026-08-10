@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import * as schema from './schema';
-import { eq, desc, and, gt } from 'drizzle-orm';
+import { eq, desc, and, gt, lt } from 'drizzle-orm';
 import { v4 as uuid } from 'uuid';
 import type { Session, NewSession, Message, NewMessage } from './schema';
 
@@ -235,13 +235,39 @@ export async function insertMessage(input: {
 
 export async function getSessionMessages(
   sessionId: string,
-): Promise<Message[]> {
+  opts?: { limit?: number; beforeSeq?: number },
+): Promise<{ messages: Message[]; hasMore: boolean }> {
   const db = getDb();
-  return db
+  const limit = opts?.limit ?? 0; // 0 = 全量（兼容旧调用）
+
+  // 无分页参数：全量正序（旧行为）
+  if (!limit || limit <= 0) {
+    const all = await db
+      .select()
+      .from(schema.messages)
+      .where(eq(schema.messages.sessionId, sessionId))
+      .orderBy(schema.messages.createdAt, schema.messages.sequence);
+    return { messages: all, hasMore: false };
+  }
+
+  // 分页：sequence 倒序取 limit+1 条（多取一条判断 hasMore），再反转为正序
+  const where = opts?.beforeSeq
+    ? and(
+        eq(schema.messages.sessionId, sessionId),
+        lt(schema.messages.sequence, opts.beforeSeq),
+      )
+    : eq(schema.messages.sessionId, sessionId);
+
+  const rows = await db
     .select()
     .from(schema.messages)
-    .where(eq(schema.messages.sessionId, sessionId))
-    .orderBy(schema.messages.createdAt, schema.messages.sequence);
+    .where(where)
+    .orderBy(desc(schema.messages.sequence))
+    .limit(limit + 1);
+
+  const hasMore = rows.length > limit;
+  const page = rows.slice(0, limit).reverse();
+  return { messages: page, hasMore };
 }
 
 /** 获取某会话 sequence 大于指定值的消息（断点之后的新消息） */
