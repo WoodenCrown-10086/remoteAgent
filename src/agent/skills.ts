@@ -8,9 +8,14 @@ export interface Skill {
   description: string;
   /** 注入到 System Prompt 的正文 */
   body: string;
+  /** 适用场景（触发规则），如“任务涉及页面/UI 设计时” */
+  triggers?: string;
+  /** 来源：system = 内置（src/agent/system-skills/），user = 用户（.agent/skills/） */
+  source: 'system' | 'user';
 }
 
-const SKILLS_DIR = path.join(process.cwd(), '.agent', 'skills');
+const USER_SKILLS_DIR = path.join(process.cwd(), '.agent', 'skills');
+const SYSTEM_SKILLS_DIR = path.join(process.cwd(), 'src', 'agent', 'system-skills');
 
 /**
  * 解析 markdown frontmatter（简单的 --- 分隔）
@@ -37,34 +42,48 @@ function parseFrontmatter(content: string): {
 }
 
 /**
- * 加载 .agent/skills/ 下所有 skill
+ * 加载指定目录下所有 skill（markdown + frontmatter）
  */
-export async function loadSkills(): Promise<Skill[]> {
+async function loadFromDir(dir: string, source: Skill['source']): Promise<Skill[]> {
   try {
-    await fs.access(SKILLS_DIR);
+    await fs.access(dir);
   } catch {
     return []; // 目录不存在
   }
 
-  const entries = await fs.readdir(SKILLS_DIR);
+  const entries = await fs.readdir(dir);
   const skills: Skill[] = [];
 
   for (const entry of entries) {
     if (!entry.endsWith('.md')) continue;
 
-    const filePath = path.join(SKILLS_DIR, entry);
+    const filePath = path.join(dir, entry);
     const raw = await fs.readFile(filePath, 'utf-8');
     const { frontmatter, body } = parseFrontmatter(raw);
 
     const name = frontmatter.name || entry.replace('.md', '');
     const description = frontmatter.description || '';
+    const triggers = frontmatter.triggers || '';
 
     if (body.trim()) {
-      skills.push({ name, description, body });
+      skills.push({ name, description, body, source, triggers });
     }
   }
 
   return skills;
+}
+
+/**
+ * 加载全部可用 skill：
+ * - 系统内置（src/agent/system-skills/，只读）
+ * - 用户自定义（.agent/skills/，可增删）
+ */
+export async function loadSkills(): Promise<Skill[]> {
+  const [system, user] = await Promise.all([
+    loadFromDir(SYSTEM_SKILLS_DIR, 'system'),
+    loadFromDir(USER_SKILLS_DIR, 'user'),
+  ]);
+  return [...system, ...user];
 }
 
 /**

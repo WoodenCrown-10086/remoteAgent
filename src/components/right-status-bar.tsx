@@ -1,6 +1,6 @@
 'use client';
 
-import { Box, ScrollText, Terminal, KeyRound, Trash2, Loader2 } from 'lucide-react';
+import { Box, ScrollText, Terminal, KeyRound, Trash2, Loader2, BookOpen } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
@@ -11,7 +11,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip';
 
-export type PanelKey = 'sandbox' | 'logs' | 'terminal' | 'apikey';
+export type PanelKey = 'sandbox' | 'logs' | 'terminal' | 'apikey' | 'skills';
 
 interface Props {
   activePanel: PanelKey | null;
@@ -111,6 +111,12 @@ export default function RightStatusBar({
           icon={<KeyRound size={15} />}
           active={activePanel === 'apikey'}
           onClick={() => onPanelChange('apikey')}
+        />
+        <StatusButton
+          label="Skills"
+          icon={<BookOpen size={15} />}
+          active={activePanel === 'skills'}
+          onClick={() => onPanelChange('skills')}
         />
 
         <Separator className="mx-2 my-1" />

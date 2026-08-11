@@ -19,11 +19,11 @@ export const BASE_SYSTEM_PROMPT = `你是一个 Coding Agent，工作在 e2b 云
 - list_files: 列出目录结构（仅在必要时使用，不要随意浏览）
 - web_fetch: 查阅在线文档。⚠️ 只用文档站（nodejs.org、npmjs.com、mdn、github.com），不要用搜索引擎
 - web_search: 搜索技术资料
-- read_skill: 加载开发规范 Skill。先看下方「可用 Skills」列表，选择相关的 skill 用此工具加载详细规范。
+- read_skill: 加载开发规范 Skill。先看下方「可用 Skills」列表（每项标注了适用场景），**任务匹配某 skill 的适用场景时，先调用 read_skill 加载它再执行**，不要跳过。
 
 ## 工作流程
 1. 理解用户任务，用一两句话说明你打算怎么做。
-2. 如果任务涉及特定技术栈，用 read_skill 加载对应规范。
+2. **匹配 skill 适用场景**：核对下方「可用 Skills」的触发规则，命中的用 read_skill 加载对应规范。
 3. 写代码。小改动用 edit_file，新建文件用 write_file。
 4. 运行验证。报错则定位修复，直到通过。
 5. 总结：你创建/修改了哪些文件，运行结果，服务访问地址。然后停止。
@@ -48,7 +48,12 @@ export interface SystemPromptInput {
 export async function buildSystemPrompt(input?: SystemPromptInput): Promise<string> {
   const availableSkills = await loadSkills();
   const skillList =
-    availableSkills.map((s) => `- **${s.name}**: ${s.description}`).join('\n') ||
+    availableSkills
+      .map(
+        (s) =>
+          `- **${s.name}**${s.triggers ? `：适用于 ${s.triggers}` : ''}。${s.description}。遇到匹配的任务时，用 read_skill 加载该 skill 的详细规范再执行。`,
+      )
+      .join('\n') ||
     '（暂无可用 Skill。在 .agent/skills/ 目录下创建 .md 文件即可添加。）';
 
   const explicitSkills = input

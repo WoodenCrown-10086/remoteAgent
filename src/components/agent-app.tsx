@@ -8,6 +8,7 @@ import LogPanel from '@/components/log-panel';
 import RightStatusBar, { PanelKey } from '@/components/right-status-bar';
 import MessageCard from '@/components/chat/message-card';
 import ChatInput from '@/components/chat-input';
+import SkillsPanel from '@/components/skills-panel';
 import type { MessageCardItem } from '@/components/chat/message-card';
 import type { ToolCallCardProps } from '@/components/chat/tool-call-card';
 import AgentStatusBar, { AgentStatus } from '@/components/agent-status-bar';
@@ -1046,7 +1047,9 @@ export default function AgentApp() {
                       ? '日志'
                       : activePanel === 'terminal'
                         ? '终端'
-                        : 'API 设置'}
+                        : activePanel === 'skills'
+                          ? 'Skills'
+                          : 'API 设置'}
                 </span>
                 <span className="text-xs text-muted-foreground">
                   再次点击右侧按钮收起
@@ -1119,6 +1122,9 @@ export default function AgentApp() {
                       )}
                     </div>
                   </ScrollArea>
+                </div>
+                <div className={activePanel === 'skills' ? 'h-full' : 'hidden'}>
+                  <SkillsPanel />
                 </div>
                 <div className={activePanel === 'apikey' ? 'h-full p-4' : 'hidden'}>
                   <h3 className="mb-3 text-sm font-semibold text-foreground">
