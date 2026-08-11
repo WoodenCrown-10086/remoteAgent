@@ -7,6 +7,7 @@ interface SessionItem {
   id: string;
   title: string;
   status: string;
+  taskStatus?: string | null;
   updatedAt: string;
 }
 
@@ -48,12 +49,16 @@ export default function SessionSidebar({
   };
 
   useEffect(() => {
-    loadSessions();
+    const t = setTimeout(() => loadSessions(), 0); // 延迟避免 effect 内同步 setState
+    return () => clearTimeout(t);
   }, [refreshKey]); // refreshKey 变化时重新加载
 
   // 每次 refreshKey 或 sessionId 变化时刷新列表
   useEffect(() => {
-    if (currentSessionId || refreshKey > 0) loadSessions();
+    if (currentSessionId || refreshKey > 0) {
+      const t = setTimeout(() => loadSessions(), 0);
+      return () => clearTimeout(t);
+    }
   }, [currentSessionId, refreshKey]);
 
   if (collapsed) {
@@ -121,6 +126,15 @@ export default function SessionSidebar({
             >
               <MessageSquare size={14} className="shrink-0" />
               <span className="truncate flex-1 text-xs">{s.title}</span>
+              {s.taskStatus === 'running' && (
+                <span className="flex shrink-0 items-center gap-1 text-[10px] text-blue-600">
+                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-blue-500" />
+                  执行中
+                </span>
+              )}
+              {s.taskStatus === 'failed' && (
+                <span className="shrink-0 text-[10px] text-red-500">失败</span>
+              )}
               <button
                 onClick={(e) => {
                   e.stopPropagation();

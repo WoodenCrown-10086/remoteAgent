@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import * as schema from './schema';
-import { eq, desc, and, gt, lt } from 'drizzle-orm';
+import { eq, desc, and, gt, lt, isNotNull } from 'drizzle-orm';
 import { v4 as uuid } from 'uuid';
 import type { Session, NewSession, Message, NewMessage } from './schema';
 
@@ -86,6 +86,7 @@ export async function initDb() {
       title TEXT NOT NULL DEFAULT '未命名会话',
       sandbox_id TEXT,
       status TEXT NOT NULL DEFAULT 'active',
+      task_status TEXT,
       summary TEXT,
       summary_tokens INTEGER,
       summary_seq INTEGER,
@@ -138,6 +139,12 @@ export async function initDb() {
   } catch {
     // 列已存在，忽略
   }
+  // 兼容旧库：补充 task_status 列（若不存在）
+  try {
+    sqlite.exec('ALTER TABLE sessions ADD COLUMN task_status TEXT;');
+  } catch {
+    // 列已存在，忽略
+  }
   return db;
 }
 
@@ -163,7 +170,18 @@ export async function createSession(input: {
 
 export async function updateSession(
   id: string,
-  updates: Partial<Pick<Session, 'title' | 'sandboxId' | 'status' | 'summary' | 'summaryTokens' | 'summarySeq'>>,
+  updates: Partial<
+    Pick<
+      Session,
+      | 'title'
+      | 'sandboxId'
+      | 'status'
+      | 'taskStatus'
+      | 'summary'
+      | 'summaryTokens'
+      | 'summarySeq'
+    >
+  >,
 ) {
   const db = getDb();
   const data: Record<string, unknown> = {
@@ -174,6 +192,7 @@ export async function updateSession(
   if (updates.title !== undefined) data.title = updates.title;
   if (updates.sandboxId !== undefined) data.sandboxId = updates.sandboxId;
   if (updates.status !== undefined) data.status = updates.status;
+  if (updates.taskStatus !== undefined) data.taskStatus = updates.taskStatus;
   if (updates.summary !== undefined) data.summary = updates.summary;
   if (updates.summaryTokens !== undefined) data.summaryTokens = updates.summaryTokens;
   if (updates.summarySeq !== undefined) data.summarySeq = updates.summarySeq;
@@ -235,10 +254,26 @@ export async function insertMessage(input: {
 
 export async function getSessionMessages(
   sessionId: string,
-  opts?: { limit?: number; beforeSeq?: number },
+  opts?: { limit?: number; beforeSeq?: number; afterSeq?: number },
 ): Promise<{ messages: Message[]; hasMore: boolean }> {
   const db = getDb();
   const limit = opts?.limit ?? 0; // 0 = 全量（兼容旧调用）
+
+  // 增量拉取：sequence > afterSeq，正序返回（后台任务执行中刷新页面后轮询用）
+  if (opts?.afterSeq !== undefined) {
+    const rows = await db
+      .select()
+      .from(schema.messages)
+      .where(
+        and(
+          eq(schema.messages.sessionId, sessionId),
+          gt(schema.messages.sequence, opts.afterSeq),
+        ),
+      )
+      .orderBy(schema.messages.sequence)
+      .limit(limit > 0 ? limit : 200);
+    return { messages: rows, hasMore: false };
+  }
 
   // 无分页参数：全量正序（旧行为）
   if (!limit || limit <= 0) {
@@ -270,9 +305,25 @@ export async function getSessionMessages(
   return { messages: page, hasMore };
 }
 
+/** 获取会话中最新一条带步骤号的消息的 stepIndex（用于任务状态展示"正在哪一步"） */
+export async function getLatestStep(sessionId: string): Promise<number | null> {
+  const db = getDb();
+  const rows = await db
+    .select({ stepIndex: schema.messages.stepIndex })
+    .from(schema.messages)
+    .where(
+      and(
+        eq(schema.messages.sessionId, sessionId),
+        isNotNull(schema.messages.stepIndex),
+      ),
+    )
+    .orderBy(desc(schema.messages.sequence))
+    .limit(1);
+  return rows[0]?.stepIndex ?? null;
+}
+
 /** 获取某会话 sequence 大于指定值的消息（断点之后的新消息） */
-export async function getSessionMessagesAfterSeq(
-  sessionId: string,
+export async function getSessionMessagesAfterSeq(  sessionId: string,
   seq: number,
 ): Promise<Message[]> {
   const db = getDb();

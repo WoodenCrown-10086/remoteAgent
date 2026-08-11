@@ -9,6 +9,7 @@ export const sessions = sqliteTable(
     title: text('title').notNull().default('未命名会话'),
     sandboxId: text('sandbox_id'),
     status: text('status').notNull().default('active'), // active | paused | killed
+    taskStatus: text('task_status'), // running | completed | failed | aborted | null
     summary: text('summary'),                       // 滚动摘要
     summaryTokens: integer('summary_tokens'),       // 摘要 token 数
     summarySeq: integer('summary_seq'),             // 已并入摘要的最后一条消息 sequence

@@ -20,77 +20,142 @@ export interface RunAgentParams {
   agentRole?: string;
   /** 生命周期 hooks（透传给 runAgentLoop） */
   hooks?: AgentLifecycleHooks;
+  /** 任务结束回调（done/error 后调用，用于沙箱清理等；后台任务模式不依赖 SSE 连接） */
+  onTaskDone?: (status: 'done' | 'error') => Promise<void>;
 }
 
+/**
+ * 运行 Agent 并返回 SSE 流。
+ *
+ * 后台任务模式：
+ * - Agent 循环在独立 Promise 中执行，**不依赖 HTTP/SSE 连接**——用户断开页面，
+ *   任务继续运行，事件照常写入 DB（onPersist）。
+ * - 返回的 ReadableStream 只负责把事件实时转发给客户端；客户端断开（cancel）时
+ *   仅停止转发，任务不受影响。
+ */
 export function runAgent(params: RunAgentParams): ReadableStream {
-  const { input, messages, systemPrompt, tools, context, maxSteps = 100, apiKey, agentId, agentRole, hooks } = params;
+  const {
+    input,
+    messages,
+    systemPrompt,
+    tools,
+    context,
+    maxSteps = 100,
+    apiKey,
+    agentId,
+    agentRole,
+    hooks,
+    onTaskDone,
+  } = params;
   const { sandbox, sessionId, startSequence, sandboxCreated, meta } = input;
 
   const encoder = new TextEncoder();
   let sequence = startSequence;
+  const listeners = new Set<(e: SSEEvent) => void>();
+  let streamClosed = false;
 
-  return new ReadableStream({
-    async start(controller) {
-      // SSE 发送 + 持久化
-      const send = (data: SSEEvent) => {
-        // 先 flush 外部事件（子 Agent 事件），再发主 Agent 事件
-        const subEvents = context.flushSubEvents?.() || [];
-        for (const ev of subEvents) {
-          const enrichedSub = { ...ev } as SSEEvent;
-          // 子 Agent 事件已带自己的 agentId，仅在缺失时才附加主 Agent 的
-          if (!enrichedSub.agentId && agentId) enrichedSub.agentId = agentId;
-          if (!enrichedSub.agentRole && agentRole) enrichedSub.agentRole = agentRole;
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(enrichedSub)}\n\n`));
-        }
-        const enriched: SSEEvent = { ...data };
-        if (agentId) enriched.agentId = agentId;
-        if (agentRole) enriched.agentRole = agentRole;
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(enriched)}\n\n`));
-        context.onPersist(enriched, sequence++);
-      };
+  // 事件发射：转发给所有订阅者（SSE）+ 持久化到 DB
+  const emit = (data: SSEEvent) => {
+    // 先 flush 外部事件（子 Agent 事件），再发主 Agent 事件
+    const subEvents = context.flushSubEvents?.() || [];
+    for (const ev of subEvents) {
+      const enrichedSub = { ...ev } as SSEEvent;
+      if (!enrichedSub.agentId && agentId) enrichedSub.agentId = agentId;
+      if (!enrichedSub.agentRole && agentRole) enrichedSub.agentRole = agentRole;
+      for (const l of listeners) l(enrichedSub);
+    }
+    const enriched: SSEEvent = { ...data };
+    if (agentId) enriched.agentId = agentId;
+    if (agentRole) enriched.agentRole = agentRole;
+    // 携带持久化 sequence，供前端增量轮询去重（SSE 实时消息也更新游标）
+    (enriched as Record<string, unknown>).sequence = sequence;
+    for (const l of listeners) l(enriched);
+    context.onPersist(enriched, sequence++);
+  };
+
+  // 后台任务：独立 Promise，断线不中断
+  const taskPromise = (async () => {
+    let status: 'done' | 'error' = 'done';
+    try {
+      emit({
+        type: 'init',
+        sandboxId: sandbox.sandboxId,
+        sandboxCreated,
+        sessionId,
+        ...(meta || {}),
+      });
+
+      await runAgentLoop({
+        systemPrompt,
+        initialMessages: messages,
+        tools,
+        hooks,
+        maxStepsPerRound: maxSteps,
+        emit,
+        apiKey,
+        agentId,
+        agentRole,
+      });
 
       try {
-        // 连接确认
-        controller.enqueue(encoder.encode(': connected\n\n'));
-
-        // 初始元信息
-        send({
-          type: 'init',
-          sandboxId: sandbox.sandboxId,
-          sandboxCreated,
-          sessionId,
-          ...(meta || {}),
-        });
-
-        // 委托给轮次循环控制器（无 hooks = 行为等价）
-        await runAgentLoop({
-          systemPrompt,
-          initialMessages: messages,
-          tools,
-          hooks,
-          maxStepsPerRound: maxSteps,
-          emit: send,
-          apiKey,
-          agentId,
-          agentRole,
-        });
-
-        controller.close();
-        // 通知回调：会话状态/沙箱绑定在此落库（route 层 onFinish）
-        try {
-          await context.onFinish?.('done', sandbox.sandboxId);
-        } catch (e) {
-          console.error('[runner] onFinish(done) 失败:', e);
-        }
-      } catch (err: any) {
-        send({ type: 'error', error: err.message || 'Stream error' });
-        controller.close();
-        try {
-          await context.onFinish?.('error', sandbox.sandboxId);
-        } catch (e) {
-          console.error('[runner] onFinish(error) 失败:', e);
-        }
+        await context.onFinish?.('done', sandbox.sandboxId);
+      } catch (e) {
+        console.error('[runner] onFinish(done) 失败:', e);
       }
+    } catch (err: any) {
+      status = 'error';
+      console.error('[runner] 后台任务异常:', err.message);
+      try {
+        emit({ type: 'error', error: err.message || 'Stream error' });
+      } catch {
+        /* 忽略发送错误 */
+      }
+      try {
+        await context.onFinish?.('error', sandbox.sandboxId);
+      } catch (e) {
+        console.error('[runner] onFinish(error) 失败:', e);
+      }
+    } finally {
+      // 任务真正结束 → 通知路由做沙箱清理等
+      try {
+        await onTaskDone?.(status);
+      } catch (e) {
+        console.error('[runner] onTaskDone 失败:', e);
+      }
+    }
+  })();
+  taskPromise.catch((e) => console.error('[runner] unhandled task error:', e));
+
+  return new ReadableStream({
+    start(controller) {
+      // 连接确认
+      controller.enqueue(encoder.encode(': connected\n\n'));
+
+      const listener = (e: SSEEvent) => {
+        try {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(e)}\n\n`));
+        } catch {
+          /* 流已关闭 */
+        }
+      };
+      listeners.add(listener);
+
+      // 任务结束 → 关闭流（若客户端仍连接）
+      taskPromise.finally(() => {
+        if (!streamClosed) {
+          streamClosed = true;
+          try {
+            controller.close();
+          } catch {
+            /* 已关闭 */
+          }
+        }
+      });
+    },
+    cancel() {
+      // 客户端断开：停止转发，但后台任务继续执行
+      listeners.clear();
+      streamClosed = true;
     },
   });
 }

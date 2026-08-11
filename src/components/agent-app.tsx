@@ -36,6 +36,7 @@ interface TerminalLine {
 
 interface ActivityEntry {
   time: string;
+  sequence?: number;
   type: 'user' | 'text' | 'reasoning' | 'tool_call' | 'tool_result' | 'tool_error' | 'step' | 'step_finish' | 'done' | 'error';
   content?: string;
   toolName?: string;
@@ -106,6 +107,7 @@ function msgsToEntries(msgs: HistoryMsg[]): ActivityEntry[] {
     return {
       time: new Date(m.created_at).toLocaleTimeString(),
       type,
+      sequence: m.sequence,
       content: m.content ?? undefined,
       toolName: m.metadata?.toolName as string | undefined,
       toolArgs: m.metadata?.toolArgs as Record<string, unknown> | undefined,
@@ -151,11 +153,71 @@ export default function AgentApp() {
   const [sidebarRefreshKey, setSidebarRefreshKey] = useState(0);
   const [agentStatuses, setAgentStatuses] = useState<AgentStatus[]>([]);
 
+  // ── 后台任务状态（断线重进后轮询；页面开着时由 SSE 的 done/error 更新） ──
+  const [taskStatus, setTaskStatus] = useState<string | null>(null);
+  const [currentStep, setCurrentStep] = useState<number | null>(null);
+
+  // ── 后台任务状态轮询 + 增量消息拉取 ──
+  // 页面开着时由 SSE 实时更新；刷新/重进后靠轮询恢复"执行中"感知：
+  // - 每 3s 查任务状态（running 期间）
+  // - 同时用 after 游标拉取 DB 里新增的消息，追加到聊天区（实时看到流程推进）
+  useEffect(() => {
+    if (!sessionId) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
+      try {
+        // 并行：任务状态 + 增量消息
+        const [statusRes, msgRes] = await Promise.all([
+          fetch(`/api/sessions/${sessionId}/status`),
+          fetch(
+            `/api/sessions/${sessionId}/messages?limit=100&after=${lastSeqRef.current}`,
+          ),
+        ]);
+
+        let taskRunning = false;
+        if (statusRes.ok) {
+          const data = await statusRes.json();
+          if (cancelled) return;
+          setTaskStatus(data.taskStatus ?? null);
+          setCurrentStep(data.currentStep ?? null);
+          taskRunning = data.taskStatus === 'running';
+        }
+
+        if (!loading && msgRes.ok && !cancelled) {
+          const mdata = await msgRes.json();
+          const newMsgs = (mdata.messages || []) as HistoryMsg[];
+          if (newMsgs.length > 0) {
+            lastSeqRef.current = Math.max(
+              lastSeqRef.current,
+              ...newMsgs.map((m) => m.sequence),
+            );
+            // 追加到 activity（增量，无重复；控制事件 type 仍会显示在时间线）
+            const entries = msgsToEntries(newMsgs);
+            setActivity((prev) => [...prev, ...entries]);
+          }
+        }
+
+        if (taskRunning && !cancelled) {
+          timer = setTimeout(poll, 3000);
+        }
+      } catch {
+        if (!cancelled) timer = setTimeout(poll, 5000);
+      }
+    };
+    poll();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [sessionId, loading]);
+
   // ── 历史消息分页（向上加载更早消息） ──
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [hasMoreHistory, setHasMoreHistory] = useState(true);
   const [firstItemIndex, setFirstItemIndex] = useState(0); // Virtuoso 无限列表虚拟索引
   const oldestSeqRef = useRef<number | null>(null); // 已加载最早消息的 sequence（游标）
+  const lastSeqRef = useRef<number>(-1); // 已加载最新消息的 sequence（增量轮询游标）
   const bubbleCountRef = useRef(0); // 上一次 bubbles 数量（计算向上加载新增数）
   const firstItemBaseRef = useRef(0); // 虚拟索引基准（首次加载后固定）
   const pendingOlderRef = useRef(false); // 标记本次 bubbles 增长来自向上加载（unshift），区分追加新消息
@@ -219,6 +281,10 @@ export default function AgentApp() {
       if (!res.ok) throw new Error('加载失败');
       const data = await res.json();
       const msgs = (data.messages || []) as HistoryMsg[];
+
+      // 增量轮询游标：已加载的最新消息 sequence（后台任务刷新页面后从此续拉）
+      lastSeqRef.current =
+        msgs.length > 0 ? msgs[msgs.length - 1].sequence : -1;
 
       // 全量数据：普通列表模式（firstItemIndex=0），无更多分页
       oldestSeqRef.current = null;
@@ -329,7 +395,10 @@ export default function AgentApp() {
     oldestSeqRef.current = null;
     bubbleCountRef.current = 0;
     firstItemBaseRef.current = 0;
+    lastSeqRef.current = -1;
     // 注意：不重置 listVisible——新会话保持可见；加载历史时 loadHistory 会自行隐藏再显示
+    setTaskStatus(null);
+    setCurrentStep(null);
   }, []);
 
   const handleSessionDelete = useCallback(
@@ -520,10 +589,10 @@ export default function AgentApp() {
       bubble: b,
       bubbleIndex: i,
     }));
-    if (loading) items.push({ type: 'loading' });
+    if (loading || taskStatus === 'running') items.push({ type: 'loading' });
     else if (bubbles.length > 0) items.push({ type: 'done' });
     return items;
-  }, [bubbles, loading]);
+  }, [bubbles, loading, taskStatus]);
 
   // ── 初始高度估算（与 virtuosoData 同序；消除测量滞后导致的滚动白屏） ──
   const heightEstimates = useMemo(
@@ -652,6 +721,11 @@ export default function AgentApp() {
           try {
             const event = JSON.parse(line.slice(6));
 
+            // SSE 实时消息也推进增量游标（轮询去重，避免重复追加）
+            if (typeof event.sequence === 'number') {
+              lastSeqRef.current = Math.max(lastSeqRef.current, event.sequence);
+            }
+
             switch (event.type) {
               case 'agent_start': {
                 setAgentStatuses((prev) => [
@@ -766,11 +840,14 @@ export default function AgentApp() {
                 addActivity({ type: 'done', finishReason: event.finishReason });
                 addLog(`🏁 完成 (${event.finishReason})`, 'info');
                 setSummary(`完成 (${event.finishReason})`);
+                setTaskStatus('completed');
+                setCurrentStep(null);
                 break;
 
               case 'error':
                 addActivity({ type: 'error', error: event.error });
                 addLog(`💥 ${event.error}`, 'error');
+                setTaskStatus('failed');
                 break;
             }
           } catch {
@@ -926,10 +1003,16 @@ export default function AgentApp() {
                 </Badge>
               </div>
               <p className="truncate text-xs text-muted-foreground">
-                {loading ? '正在执行任务...' : sandboxStatus || '等待任务输入'}
+                {loading || taskStatus === 'running'
+                  ? `执行中${currentStep ? ` · 第 ${currentStep} 步` : '...'}`
+                  : taskStatus === 'failed'
+                    ? '任务失败'
+                    : taskStatus === 'aborted'
+                      ? '任务已中止'
+                      : sandboxStatus || '等待任务输入'}
               </p>
             </div>
-            {loading && (
+            {(loading || taskStatus === 'running') && (
               <div className="ml-auto flex w-36 items-center gap-2">
                 <Activity size={14} className="animate-pulse text-blue-500" />
                 <Progress value={65} className="h-1.5 flex-1" />
@@ -1022,7 +1105,7 @@ export default function AgentApp() {
           {/* 输入区（独立 memo 组件，打字不重渲染巨型树） */}
           <ChatInput
             value={prompt}
-            loading={loading}
+            loading={loading || taskStatus === 'running'}
             summary={summary}
             onChange={setPrompt}
             onSend={callApi}

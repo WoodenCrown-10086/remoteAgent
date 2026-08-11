@@ -2,6 +2,7 @@ import { Sandbox } from '@e2b/code-interpreter';
 import { Orchestrator } from '@/agent/orchestrator';
 import { buildSystemPrompt } from '@/agent/prompts';
 import { runAgent, createPersistCallback } from '@/agent/runner';
+import { taskManager } from '@/lib/task-manager';
 import { ContextManager } from '@/agent/memory/context-manager';
 import { createEmbeddingProvider } from '@/agent/memory/embedding';
 import { createMemorySearchTool } from '@/agent/tools/memory-search';
@@ -185,7 +186,12 @@ export async function POST(req: Request) {
     sandboxId: sandbox.sandboxId,
   });
 
-  // ── 6. 运行 Agent ──
+  // ── 6. 运行 Agent（后台任务模式：断线不中断，状态写 DB） ──
+  // 标记任务开始
+  await taskManager.start(currentSessionId).catch((e) =>
+    console.error('[task] start 失败', e.message),
+  );
+
   const sseStream = runAgent({
     input: {
       sandbox,
@@ -222,9 +228,15 @@ export async function POST(req: Request) {
       ),
       onFinish: (status) => {
         const finalStatus = shouldKill ? 'killed' : 'paused';
+        const taskFinal = status === 'error' ? 'failed' : 'completed';
+        // 更新内存 + DB 任务状态（后台任务模式，进程重启后可从 DB 恢复）
+        taskManager.finish(currentSessionId, taskFinal).catch((e) =>
+          console.error('[task] finish 失败', e.message),
+        );
         updateSession(currentSessionId, {
           status: finalStatus,
           sandboxId: shouldKill ? undefined : sandbox?.sandboxId,
+          taskStatus: taskFinal,
         }).catch((e) => console.error('[db session update]', e.message));
       },
       // 子 Agent 事件实时注入主 SSE 流（runner send 时 flush 并清空）
@@ -234,48 +246,36 @@ export async function POST(req: Request) {
         return evs;
       },
     },
-  });
-
-  // ── 7. 沙箱生命周期（在流结束后）──
-  const cleanupStream = new ReadableStream({
-    async start(controller) {
-      const reader = sseStream.getReader();
+    // 任务真正结束（done/error 后）：收尾子 Agent + 沙箱生命周期。
+    // 在后台 Promise 中执行，与 SSE 连接是否断开无关。
+    onTaskDone: async (status) => {
       try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          controller.enqueue(value);
+        const result = await orchestrator.waitAll();
+        if (result.summary) {
+          console.log(
+            `[orchestrator] 子任务汇总 (passed=${result.passed} timedOut=${result.timedOut}):\n${result.summary}`,
+          );
         }
-      } finally {
-        reader.releaseLock();
-        // 等待子 Agent 任务完成（带超时，防止死锁）
+      } catch (e: any) {
+        console.error('[orchestrator] waitAll 异常:', e.message);
+      }
+      console.log(`[api] 后台任务结束 (${status})`, {
+        sessionId: currentSessionId.slice(0, 8),
+        sandboxId: sandbox?.sandboxId?.slice(0, 12),
+      });
+      if (sandbox) {
         try {
-          const result = await orchestrator.waitAll();
-          if (result.summary) {
-            console.log(`[orchestrator] 子任务汇总 (passed=${result.passed} timedOut=${result.timedOut}):\n${result.summary}`);
-          }
+          if (shouldKill) await sandbox.kill();
+          else await sandbox.pause();
         } catch (e: any) {
-          console.error('[orchestrator] waitAll 异常:', e.message);
+          console.error('[e2b cleanup]', e.message);
         }
-        console.log(`[api] POST /api/hello 完成`, {
-          sessionId: currentSessionId.slice(0, 8),
-          sandboxId: sandbox?.sandboxId?.slice(0, 12),
-          sandboxStatus: shouldKill ? 'killed' : 'paused',
-        });
-        if (sandbox) {
-          try {
-            if (shouldKill) await sandbox.kill();
-            else await sandbox.pause();
-          } catch (e: any) {
-            console.error('[e2b cleanup]', e.message);
-          }
-        }
-        controller.close();
       }
     },
   });
 
-  return new Response(cleanupStream, {
+  // SSE 响应（后台任务模式下，此流断开不影响任务继续）
+  return new Response(sseStream, {
     headers: {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
