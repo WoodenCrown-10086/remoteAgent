@@ -176,14 +176,11 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
       });
     } catch (e: any) {
       await hooks?.onError?.({ error: e, roundIndex: round });
-      break;
+      // 模型调用中断/失败：向上抛出，让 runner 把任务标记为 error（而非静默「完成」）
+      throw e;
     }
 
-    const { text, toolCalls, finishReason } = await consumeStream(result, emit, hooks, round)
-      .catch(async (e: any) => {
-        await hooks?.onError?.({ error: e, roundIndex: round });
-        return { text: '', toolCalls: [], finishReason: 'error' };
-      });
+    const { text, toolCalls, finishReason } = await consumeStream(result, emit, hooks, round);
     const response = await Promise.resolve(result.response).catch(() => ({ messages }));   // AI SDK 完整消息状态
     // 清理 messages 供下一轮回传：移除 reasoning、清理未完成 tool-call、移除空消息
     // （DeepSeek 的 reasoning 结构重传时可能触发 ModelMessage schema 校验失败）

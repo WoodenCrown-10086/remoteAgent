@@ -78,12 +78,25 @@ async function loadFromDir(dir: string, source: Skill['source']): Promise<Skill[
  * - 系统内置（src/agent/system-skills/，只读）
  * - 用户自定义（.agent/skills/，可增删）
  */
+// ── 进程内缓存 ──
+// skill 文件本身很小，但 loadSkills 会被多条路径高频调用（主 Agent 构建 prompt、
+// 每个子 Agent 组装 prompt、read_skill 工具），故做进程内缓存避免重复读盘。
+// 用户通过 /api/skills 增删 skill 时调用 invalidateSkillCache() 失效。
+let _skillsCache: Skill[] | null = null;
+
 export async function loadSkills(): Promise<Skill[]> {
+  if (_skillsCache) return _skillsCache;
   const [system, user] = await Promise.all([
     loadFromDir(SYSTEM_SKILLS_DIR, 'system'),
     loadFromDir(USER_SKILLS_DIR, 'user'),
   ]);
-  return [...system, ...user];
+  _skillsCache = [...system, ...user];
+  return _skillsCache;
+}
+
+/** 用户增删 skill 后调用，清空缓存使下次 loadSkills 重新读盘 */
+export function invalidateSkillCache(): void {
+  _skillsCache = null;
 }
 
 /**
@@ -139,4 +152,35 @@ export function buildSkillPrompt(skills: Skill[]): string {
     (s) => `### ${s.name}\n${s.description}\n\n${s.body}`,
   );
   return `\n\n## 启用的 Skills\n${sections.join('\n\n')}`;
+}
+
+/**
+ * 生成中性的 skill 清单文本（名字 + 触发场景 + 描述），供注入 System Prompt 展示。
+ * 「何时 read_skill / 如何派发」等动作指引由各 System Prompt 正文负责，这里只给清单本身。
+ */
+export function formatSkillList(skills: Skill[]): string {
+  return (
+    skills
+      .map(
+        (s) =>
+          `- **${s.name}**${s.triggers ? `：适用于 ${s.triggers}` : ''}。${s.description}。`,
+      )
+      .join('\n') ||
+    '（暂无可用 Skill。在 .agent/skills/ 目录下创建 .md 文件即可添加。）'
+  );
+}
+
+/**
+ * 生成统一注入子 Agent 的 skill 使用说明段：
+ * - 列出可用 skills（名字 + 触发 + 描述）
+ * - 声明「靠主 Agent 分发、不主动读取」的规则
+ * - 声明「缺 skill 用 report_skill_gap 上报」的规则
+ */
+export function buildSkillUsageSection(skillList: string): string {
+  return `\n\n## 可用 Skills（由主 Agent 分发，勿主动读取）
+${skillList}
+
+使用规则：
+- 仅当派发的任务里明确要求「使用某 skill」时，才用 read_skill 加载它；不要主动 read_skill。
+- 若完成当前任务需要某个 skill / 能力，但任务未指明、上面列表里也没有，调用 report_skill_gap 声明缺失并停止——任务会被标记为未完成，主 Agent 会在下一轮补上能力后重新派发，不要强行产出劣质结果。`;
 }

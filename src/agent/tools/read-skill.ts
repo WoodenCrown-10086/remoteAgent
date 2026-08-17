@@ -11,7 +11,7 @@ const inputSchema = z.object({
  */
 export const readSkill = tool({
   description:
-    '加载指定 skill 的完整规范内容。当你需要遵循某个开发规范（如 TDD、TypeScript 严格模式）时调用。先查看可用 skill 列表（在 System Prompt 末尾），选择相关 skill，用此工具获取详细规范。',
+    '加载指定 skill 的完整规范内容（返回 description 与 body）。何时加载、加载哪个 skill，遵循 System Prompt 中的 skill 使用规则。',
   inputSchema,
   execute: async (args) => {
     const { name } = args;

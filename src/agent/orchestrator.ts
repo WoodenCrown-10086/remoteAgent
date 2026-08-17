@@ -5,6 +5,9 @@ import type { EmbeddingProvider } from './memory/types';
 import { ContextManager } from './memory/context-manager';
 import type { Sandbox } from '@e2b/code-interpreter';
 import { getNextSequence } from '@/db/db';
+import { loadSkills, formatSkillList, buildSkillUsageSection } from './skills';
+import { createReportArtifactTool } from './tools/report-artifact';
+import { createReportSkillGapTool } from './tools/report-skill-gap';
 
 export type TaskStatus = 'pending' | 'running' | 'done' | 'failed' | 'passed';
 
@@ -27,6 +30,8 @@ export interface AgentReport {
   status: 'passed' | 'failed' | 'pending';   // 完成 Flag
   summary: string;
   artifacts: string[];
+  /** 子 Agent 声明缺失的 skill（能力不足，任务未完成） */
+  missingSkills?: string[];
   report: string;
   gatePassed?: boolean;
   gateReason?: string;
@@ -137,6 +142,11 @@ export class Orchestrator {
   }> {
     const failures: string[] = [];
     for (const r of reports) {
+      if (r.missingSkills && r.missingSkills.length > 0) {
+        failures.push(`${r.taskId}: 缺少 skill（需要: ${r.missingSkills.join(', ')}），任务未完成`);
+        r.gatePassed = false;
+        continue;
+      }
       if (r.status !== 'passed') {
         failures.push(`${r.taskId}: Agent 未准出 (${r.status})`);
         continue;
@@ -229,9 +239,33 @@ export class Orchestrator {
   private async runTask(node: TaskNode) {
     node.status = 'running';
     this.running++;
+    const artifacts: string[] = [];
+    const missingSkills: string[] = [];
     try {
       const role = ROLE_POOL[node.role];
-      const tools = buildRoleTools(role, this.opts.sandbox);
+      let systemPrompt = role.systemPrompt;
+      let tools = buildRoleTools(role, this.opts.sandbox);
+
+      // 所有子 Agent：统一注入 skill 段（列表 + 靠分发规则）+ report_skill_gap（缺能力上报）
+      const skills = await loadSkills();
+      systemPrompt += buildSkillUsageSection(formatSkillList(skills));
+      tools = {
+        ...tools,
+        report_skill_gap: createReportSkillGapTool((gaps) => {
+          for (const g of gaps) missingSkills.push(g);
+        }),
+      };
+
+      // coder 额外：注入产物声明工具（准出门禁校验产物真实存在）
+      if (role.role === 'coder') {
+        tools = {
+          ...tools,
+          report_artifact: createReportArtifactTool((paths) => {
+            for (const p of paths) artifacts.push(p);
+          }),
+        };
+      }
+
       const nsSessionId = `${this.opts.sessionId}:${node.id}`;
 
       const ctxManager = this.opts.embeddingProvider
@@ -255,7 +289,7 @@ export class Orchestrator {
           meta: {},
         },
         messages: [{ role: 'user', content: node.task }],
-        systemPrompt: role.systemPrompt,
+        systemPrompt,
         tools,
         context: {
           onPersist: () => {},
@@ -267,15 +301,16 @@ export class Orchestrator {
         // 子 Agent 生命周期 hooks：onComplete 记录验收结果供门禁判定
         hooks: {
           onComplete: async ({ summary }) => {
+            const incomplete = missingSkills.length > 0;
             const report: AgentReport = {
               taskId: node.id,
               role: node.role,
               task: node.task,
-              // 成功路径恒 passed：onComplete 仅在成功流结束时调用（异常走 catch 兜底）；
-              // 若任务已被外部标记 failed（如 waitFor 超时），则如实记录 failed，避免覆盖为 passed
-              status: node.status === 'failed' ? 'failed' : 'passed',
+              // 缺 skill 或外部标记 failed 时如实记录 failed，避免覆盖为 passed
+              status: incomplete || node.status === 'failed' ? 'failed' : 'passed',
               summary: summary.slice(0, 200),
-              artifacts: [],
+              artifacts: [...artifacts],
+              missingSkills: [...missingSkills],
               report: summary,
             };
             this.agentStates.set(node.id, report);

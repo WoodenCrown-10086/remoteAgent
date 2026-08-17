@@ -53,17 +53,24 @@ export function runAgent(params: RunAgentParams): ReadableStream {
   let sequence = startSequence;
   const listeners = new Set<(e: SSEEvent) => void>();
   let streamClosed = false;
+  // 流未就绪（前端尚未开始读）前，子 Agent 事件的积压队列
+  const pendingSubEvents: SSEEvent[] = [];
+
+  // 子 Agent 事件实时推送：orchestrator 产生事件后立即转发，不再积压等待主 Agent 事件
+  const pushSubEvent = (ev: Record<string, unknown>) => {
+    const enrichedSub = { ...ev } as SSEEvent;
+    if (!enrichedSub.agentId && agentId) enrichedSub.agentId = agentId;
+    if (!enrichedSub.agentRole && agentRole) enrichedSub.agentRole = agentRole;
+    if (listeners.size === 0) {
+      pendingSubEvents.push(enrichedSub);
+      return;
+    }
+    for (const l of listeners) l(enrichedSub);
+  };
+  context.onLiveEmit?.(pushSubEvent);
 
   // 事件发射：转发给所有订阅者（SSE）+ 持久化到 DB
   const emit = (data: SSEEvent) => {
-    // 先 flush 外部事件（子 Agent 事件），再发主 Agent 事件
-    const subEvents = context.flushSubEvents?.() || [];
-    for (const ev of subEvents) {
-      const enrichedSub = { ...ev } as SSEEvent;
-      if (!enrichedSub.agentId && agentId) enrichedSub.agentId = agentId;
-      if (!enrichedSub.agentRole && agentRole) enrichedSub.agentRole = agentRole;
-      for (const l of listeners) l(enrichedSub);
-    }
     const enriched: SSEEvent = { ...data };
     if (agentId) enriched.agentId = agentId;
     if (agentRole) enriched.agentRole = agentRole;
@@ -139,6 +146,12 @@ export function runAgent(params: RunAgentParams): ReadableStream {
         }
       };
       listeners.add(listener);
+
+      // 补发流就绪前积压的子 Agent 事件（避免极端竞态下丢失）
+      for (const ev of pendingSubEvents) {
+        for (const l of listeners) l(ev);
+      }
+      pendingSubEvents.length = 0;
 
       // 任务结束 → 关闭流（若客户端仍连接）
       taskPromise.finally(() => {

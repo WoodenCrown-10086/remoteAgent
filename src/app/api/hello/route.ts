@@ -14,7 +14,7 @@ import {
   insertMessage,
   getNextSequence,
 } from '@/db/db';
-import { createAllSandboxTools, createReadSkillTool } from '@/agent/tools';
+import { createReadSkillTool } from '@/agent/tools';
 import { createDispatchTool } from '@/agent/tools/dispatch';
 
 export const dynamic = 'force-dynamic';
@@ -133,26 +133,32 @@ export async function POST(req: Request) {
   }
 
   // ── 4. 工具 ──
-  const tools = {
-    ...createAllSandboxTools(sandbox),
+  // 主 Agent 是纯编排者：不注入任何沙箱工具（write_file / execute_command / read_file 等），
+  // 只保留 dispatch + read_skill（读取 skill 正文用于分发决策），从能力层面杜绝「自己完成任务」。
+  const tools: Record<string, unknown> = {
     read_skill: createReadSkillTool(),
   };
 
   // ── 4.1 多 Agent 调度器（主 Agent 通过 dispatch 派发子任务） ──
-  // 子 Agent 事件先入内存队列，主 Agent 事件流中顺带补发
-  let subAgentEvents: Array<Record<string, unknown>> = [];
+  // 子 Agent 事件通过 onLiveEmit 拿到的 pushSubEvent 实时推入 SSE 流（不再积压等待主 Agent 事件）
+  let pushSubEvent: ((ev: Record<string, unknown>) => void) | undefined;
   const orchestrator = new Orchestrator({
     sandbox,
     sessionId: currentSessionId,
     apiKey,
     embeddingProvider,
     maxParallel: 3,
-    emit: (data) => subAgentEvents.push(data),
+    emit: (data) => pushSubEvent?.(data),
     gateVerify: async (report) => {
-      // 门禁：检查子 Agent 声明的产物文件真实存在
+      // 真门禁：coder 必须声明产物，且声明的每个文件都必须真实存在
+      // （reviewer/evaluator 的产物是结论文本、无文件清单，不受此约束）
+      if (report.role === 'coder' && report.artifacts.length === 0) {
+        return { ok: false, reason: 'coder 未声明任何产物文件（需调用 report_artifact）' };
+      }
       for (const p of report.artifacts) {
+        const fullPath = p.startsWith('/') ? p : `/home/user/${p}`;
         try {
-          await sandbox.files.read(p);
+          await sandbox.files.read(fullPath);
         } catch {
           return { ok: false, reason: `产物不存在: ${p}` };
         }
@@ -239,11 +245,9 @@ export async function POST(req: Request) {
           taskStatus: taskFinal,
         }).catch((e) => console.error('[db session update]', e.message));
       },
-      // 子 Agent 事件实时注入主 SSE 流（runner send 时 flush 并清空）
-      flushSubEvents: () => {
-        const evs = [...subAgentEvents];
-        subAgentEvents = [];
-        return evs;
+      // 子 Agent 事件实时推送：把 runner 的 push 函数交给 orchestrator 使用
+      onLiveEmit: (push) => {
+        pushSubEvent = push;
       },
     },
     // 任务真正结束（done/error 后）：收尾子 Agent + 沙箱生命周期。

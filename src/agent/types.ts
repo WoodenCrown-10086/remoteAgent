@@ -55,8 +55,12 @@ export interface StreamContext {
   onPersist: (data: SSEEvent, sequence: number) => void | Promise<void>;
   /** Agent 完成回调 */
   onFinish?: (status: 'done' | 'error', sandboxId: string | undefined) => void | Promise<void>;
-  /** 外部事件（子 Agent 等）flush 回调：返回待注入主流的事件数组 */
-  flushSubEvents?: () => Array<Record<string, unknown>>;
+  /**
+   * 子 Agent 事件实时推送回调：runner 在内部 push 函数就绪后调用一次，
+   * 把「推送子 Agent 事件到 SSE 流」的函数交给外部（orchestrator），
+   * 使子 Agent 事件无需积压等待主 Agent 事件即可实时推送。
+   */
+  onLiveEmit?: (push: (ev: Record<string, unknown>) => void) => void;
 }
 
 // ── 持久化消息输入 ──

@@ -1,6 +1,6 @@
 import { promises as fs } from 'fs';
 import path from 'path';
-import { loadSkills } from '@/agent/skills';
+import { loadSkills, invalidateSkillCache } from '@/agent/skills';
 
 /**
  * Skill 管理 API
@@ -70,6 +70,7 @@ export async function POST(req: Request) {
     const filePath = path.join(SKILLS_DIR, `${name}.md`);
     const md = `---\nname: ${name}\ndescription: ${description || name}\n---\n\n${content}\n`;
     await fs.writeFile(filePath, md, 'utf-8');
+    invalidateSkillCache();
 
     return Response.json({ ok: true, name });
   } catch (e) {
@@ -102,5 +103,6 @@ export async function DELETE(req: Request) {
   }
 
   await fs.unlink(filePath);
+  invalidateSkillCache();
   return Response.json({ ok: true, name });
 }
