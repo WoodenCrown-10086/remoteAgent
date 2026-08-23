@@ -49,10 +49,17 @@ export async function POST(req: Request) {
   if (p?.op === 13) {
     const plainToken = p?.d?.plain_token;
     const eventTs = p?.d?.event_ts;
+    console.log('[qqbot] 回调验证请求:', {
+      plain_token: plainToken,
+      event_ts: eventTs,
+      secretLength: secret.length,
+      secretPrefix: `${secret.slice(0, 4)}****`,
+    });
     if (!plainToken || !eventTs) {
       return Response.json({ error: '缺少 plain_token / event_ts' }, { status: 400 });
     }
     const signature = signCallbackValidation(secret, String(eventTs), String(plainToken));
+    console.log('[qqbot] 生成签名:', signature);
     return Response.json({ plain_token: String(plainToken), signature });
   }
 
