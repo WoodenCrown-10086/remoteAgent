@@ -3,7 +3,7 @@ import { drizzle } from 'drizzle-orm/better-sqlite3';
 import * as schema from './schema';
 import { eq, desc, and, gt, lt, isNotNull } from 'drizzle-orm';
 import { v4 as uuid } from 'uuid';
-import type { Session, NewSession, Message, NewMessage } from './schema';
+import type { Session, NewSession, Message, NewMessage, AgentTask } from './schema';
 
 // ── 数据库文件路径 ──
 const DB_PATH =
@@ -122,6 +122,18 @@ export async function initDb() {
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_chunks_session ON message_chunks(session_id);
+
+    CREATE TABLE IF NOT EXISTS agent_tasks (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+      agent_id TEXT NOT NULL,
+      agent_role TEXT NOT NULL,
+      status TEXT NOT NULL,
+      task TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_agent_tasks_session ON agent_tasks(session_id);
   `);
   // 兼容旧库：补充 summary / summary_tokens 列（若不存在）
   try {
@@ -380,4 +392,68 @@ export async function insertMessagesBatch(
       createdAt: now,
     })),
   );
+}
+
+// ── agent_tasks 子 Agent 状态（按 session 持久化，刷新后可查询恢复）──
+
+/** upsert 子 Agent 状态（agent_start 时 running，agent_finish 时更新 status；task 缺省保留原值） */
+export async function upsertAgentTask(input: {
+  sessionId: string;
+  agentId: string;
+  agentRole: string;
+  status: 'running' | 'passed' | 'failed';
+  task?: string;
+}): Promise<void> {
+  const db = getDb();
+  const now = new Date().toISOString();
+
+  const existing = await db
+    .select()
+    .from(schema.agentTasks)
+    .where(
+      and(
+        eq(schema.agentTasks.sessionId, input.sessionId),
+        eq(schema.agentTasks.agentId, input.agentId),
+      ),
+    )
+    .limit(1);
+
+  if (existing.length > 0) {
+    await db
+      .update(schema.agentTasks)
+      .set({
+        agentRole: input.agentRole,
+        status: input.status,
+        task: input.task ?? existing[0].task,
+        updatedAt: now,
+      })
+      .where(eq(schema.agentTasks.id, existing[0].id));
+  } else {
+    await db.insert(schema.agentTasks).values({
+      id: uuid(),
+      sessionId: input.sessionId,
+      agentId: input.agentId,
+      agentRole: input.agentRole,
+      status: input.status,
+      task: input.task ?? null,
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+}
+
+/** 查询某 session 的子 Agent 状态（按 createdAt 排序） */
+export async function getAgentTasks(sessionId: string): Promise<AgentTask[]> {
+  const db = getDb();
+  return db
+    .select()
+    .from(schema.agentTasks)
+    .where(eq(schema.agentTasks.sessionId, sessionId))
+    .orderBy(schema.agentTasks.createdAt);
+}
+
+/** 清除某 session 的所有子 Agent 状态（新任务开始时调用） */
+export async function clearAgentTasks(sessionId: string): Promise<void> {
+  const db = getDb();
+  await db.delete(schema.agentTasks).where(eq(schema.agentTasks.sessionId, sessionId));
 }

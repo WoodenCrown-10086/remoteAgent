@@ -13,6 +13,8 @@ import {
   updateSession,
   insertMessage,
   getNextSequence,
+  upsertAgentTask,
+  clearAgentTasks,
 } from '@/db/db';
 import { createReadSkillTool } from '@/agent/tools';
 import { createDispatchTool } from '@/agent/tools/dispatch';
@@ -170,7 +172,33 @@ export async function POST(req: Request) {
     apiKey,
     embeddingProvider,
     maxParallel: 3,
-    emit: (data) => pushSubEvent?.(data),
+    emit: (data) => {
+      // 子 Agent 状态落库（刷新后可按 session 查询恢复）
+      const d = data as {
+        type?: string;
+        agentId?: string;
+        agentRole?: string;
+        task?: string;
+        status?: string;
+      };
+      if (d.type === 'agent_start' && d.agentId && d.agentRole) {
+        upsertAgentTask({
+          sessionId: currentSessionId,
+          agentId: d.agentId,
+          agentRole: d.agentRole,
+          status: 'running',
+          task: d.task,
+        }).catch((e) => console.error('[db agent] upsert 失败:', e.message));
+      } else if (d.type === 'agent_finish' && d.agentId && d.agentRole) {
+        upsertAgentTask({
+          sessionId: currentSessionId,
+          agentId: d.agentId,
+          agentRole: d.agentRole,
+          status: d.status === 'failed' ? 'failed' : 'passed',
+        }).catch((e) => console.error('[db agent] upsert 失败:', e.message));
+      }
+      pushSubEvent?.(data);
+    },
     gateVerify: async (report) => {
       // 真门禁：coder 必须声明产物，且声明的每个文件都必须真实存在
       // （reviewer/evaluator 的产物是结论文本、无文件清单，不受此约束）
@@ -208,6 +236,10 @@ export async function POST(req: Request) {
   }
 
   // ── 6. 运行 Agent（后台任务模式：断线不中断，状态写 DB） ──
+  // 新任务开始：清除该 session 上一次任务的子 Agent 状态（按 session 隔离）
+  await clearAgentTasks(currentSessionId).catch((e) =>
+    console.error('[db agent] 清除失败:', e.message),
+  );
   // 标记任务开始
   await taskManager.start(currentSessionId).catch((e) =>
     console.error('[task] start 失败', e.message),
@@ -266,6 +298,12 @@ export async function POST(req: Request) {
         // 任务结束 → 通过 QQ 机器人发送通知（主动消息）
         const qqOpenid = qqBotOpenid || process.env.QQ_BOT_OPENID;
         if (qqOpenid) {
+          console.log('[qq-bot] 发送通知:', {
+            openid: qqOpenid,
+            openidSource: qqBotOpenid ? '请求头(前端localStorage)' : '环境变量',
+            appId: qqBotAppId || process.env.QQ_BOT_APP_ID,
+            appIdSource: qqBotAppId ? '请求头(前端localStorage)' : '环境变量',
+          });
           const content =
             status === 'error'
               ? '⚠️ [Agent 任务失败] 任务执行出错，请到 Web 端查看详情。'

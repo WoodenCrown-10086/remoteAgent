@@ -167,12 +167,13 @@ export default function AgentApp() {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const poll = async () => {
       try {
-        // 并行：任务状态 + 增量消息
-        const [statusRes, msgRes] = await Promise.all([
+        // 并行：任务状态 + 增量消息 + 子 Agent 状态
+        const [statusRes, msgRes, agentsRes] = await Promise.all([
           fetch(`/api/sessions/${sessionId}/status`),
           fetch(
             `/api/sessions/${sessionId}/messages?limit=100&after=${lastSeqRef.current}`,
           ),
+          fetch(`/api/sessions/${sessionId}/agents`),
         ]);
 
         let taskRunning = false;
@@ -182,6 +183,13 @@ export default function AgentApp() {
           setTaskStatus(data.taskStatus ?? null);
           setCurrentStep(data.currentStep ?? null);
           taskRunning = data.taskStatus === 'running';
+        }
+
+        // 子 Agent 状态：轮询同步（刷新后 SSE 断开时，靠这里实时恢复/更新）
+        if (agentsRes.ok && !cancelled) {
+          const adata = await agentsRes.json();
+          const agents = (adata.agents || []) as AgentStatus[];
+          if (agents.length > 0) setAgentStatuses(agents);
         }
 
         if (!loading && msgRes.ok && !cancelled) {
@@ -325,6 +333,18 @@ export default function AgentApp() {
 
       setActivity(msgsToEntries(msgs));
       setSessionId(sid);
+
+      // 恢复子 Agent 状态（刷新页面后从 DB 查询，正在运行 + 已结束的都能恢复，按 session 隔离）
+      try {
+        const agentsRes = await fetch(`/api/sessions/${sid}/agents`);
+        if (agentsRes.ok) {
+          const agentsData = await agentsRes.json();
+          const agents = (agentsData.agents || []) as AgentStatus[];
+          if (agents.length > 0) setAgentStatuses(agents);
+        }
+      } catch {
+        /* 查询子 Agent 状态失败，忽略（下次 SSE 事件会重新填充） */
+      }
 
       // 先渲染（隐藏），等 Virtuoso 布局完成后再定位底部并显示——用户全程看不到跳动
       // 定位由下方「首次定位 effect」负责（确保 Virtuoso 已挂载 + 布局完成）
@@ -699,6 +719,7 @@ export default function AgentApp() {
     setSummary('');
     setLogs([]);
     setTerminalLines([]);
+    setAgentStatuses([]); // 新任务开始：清空上一次任务的子 Agent 状态
     abortRef.current = new AbortController();
 
     // 清空输入框

@@ -78,3 +78,25 @@ export type Message = typeof messages.$inferSelect;
 export type NewMessage = typeof messages.$inferInsert;
 export type MessageChunk = typeof messageChunks.$inferSelect;
 export type NewMessageChunk = typeof messageChunks.$inferInsert;
+
+// ── agent_tasks 子 Agent 状态表（按 session 持久化，刷新后可查询恢复）──
+
+export const agentTasks = sqliteTable(
+  'agent_tasks',
+  {
+    id: text('id').primaryKey(),
+    sessionId: text('session_id')
+      .notNull()
+      .references(() => sessions.id, { onDelete: 'cascade' }),
+    agentId: text('agent_id').notNull(),   // 节点 id（如 planner-1、coder-2）
+    agentRole: text('agent_role').notNull(), // planner | coder | reviewer | evaluator
+    status: text('status').notNull(),       // running | passed | failed
+    task: text('task'),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (t) => [index('idx_agent_tasks_session').on(t.sessionId)],
+);
+
+export type AgentTask = typeof agentTasks.$inferSelect;
+export type NewAgentTask = typeof agentTasks.$inferInsert;
