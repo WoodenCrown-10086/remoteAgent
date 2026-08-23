@@ -3,7 +3,7 @@ import { useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback } fr
 import { Virtuoso, VirtuosoHandle } from 'react-virtuoso';
 import SandboxPanel from '@/components/sandbox-panel';
 import SessionSidebar from '@/components/session-sidebar';
-import ApiKeySettings from '@/components/api-key-settings';
+import ApiKeySettings, { type QQBotConfig } from '@/components/api-key-settings';
 import LogPanel from '@/components/log-panel';
 import RightStatusBar, { PanelKey } from '@/components/right-status-bar';
 import MessageCard from '@/components/chat/message-card';
@@ -18,7 +18,7 @@ import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Progress } from '@/components/ui/progress';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { CheckCircle2, Loader2, Bot, ChevronDown, Activity, X } from 'lucide-react';
+import { CheckCircle2, Loader2, Bot, ChevronDown, Activity, X, MessageCircle } from 'lucide-react';
 
 // ── 类型 ──
 
@@ -226,6 +226,12 @@ export default function AgentApp() {
   // ── API Key 状态（首渲染与 SSR 一致，挂载后恢复） ──
   const [apiKey, setApiKey] = useState('');
   const [e2bApiKey, setE2bApiKey] = useState('');
+  const [qqBot, setQqBot] = useState<QQBotConfig>({
+    appId: '',
+    appSecret: '',
+    openid: '2365195094', // 默认接收者 QQ 号
+  });
+  const [showQQGuide, setShowQQGuide] = useState(false);
 
   // ── 挂载后从 localStorage 恢复 apiKey（setTimeout 保证 hydration 后执行，SSR 安全） ──
   useEffect(() => {
@@ -234,6 +240,20 @@ export default function AgentApp() {
       if (saved) setApiKey(saved);
       const savedE2b = localStorage.getItem('e2bApiKey');
       if (savedE2b) setE2bApiKey(savedE2b);
+
+      const savedQQAppId = localStorage.getItem('qqBotAppId');
+      const savedQQSecret = localStorage.getItem('qqBotAppSecret');
+      const savedQQOpenid = localStorage.getItem('qqBotOpenid');
+      setQqBot({
+        appId: savedQQAppId || '',
+        appSecret: savedQQSecret || '',
+        openid: savedQQOpenid || '2365195094',
+      });
+
+      // 未配置 QQ 机器人（缺 appId/appSecret）→ 弹可关闭提醒
+      if (!savedQQAppId || !savedQQSecret) {
+        setShowQQGuide(true);
+      }
     }, 0);
     return () => clearTimeout(t);
   }, []);
@@ -255,6 +275,16 @@ export default function AgentApp() {
     if (e2bApiKey) localStorage.setItem('e2bApiKey', e2bApiKey);
     else localStorage.removeItem('e2bApiKey');
   }, [e2bApiKey]);
+
+  // ── QQ 机器人配置变化时持久化 ──
+  useEffect(() => {
+    if (qqBot.appId) localStorage.setItem('qqBotAppId', qqBot.appId);
+    else localStorage.removeItem('qqBotAppId');
+    if (qqBot.appSecret) localStorage.setItem('qqBotAppSecret', qqBot.appSecret);
+    else localStorage.removeItem('qqBotAppSecret');
+    if (qqBot.openid) localStorage.setItem('qqBotOpenid', qqBot.openid);
+    else localStorage.removeItem('qqBotOpenid');
+  }, [qqBot]);
 
   // ── sessionId 变化时持久化到 localStorage ──
   useEffect(() => {
@@ -1216,9 +1246,11 @@ export default function AgentApp() {
                   <ApiKeySettings
                     apiKey={apiKey}
                     e2bApiKey={e2bApiKey}
-                    onSave={(k, e2bK) => {
+                    qqBot={qqBot}
+                    onSave={(k, e2bK, qq) => {
                       setApiKey(k);
                       setE2bApiKey(e2bK);
+                      setQqBot(qq);
                     }}
                   />
                 </div>
@@ -1236,6 +1268,35 @@ export default function AgentApp() {
           onKillSandbox={killSandbox}
         />
       </div>
+
+      {/* QQ 机器人绑定提醒弹窗（可关闭） */}
+      {showQQGuide && (
+        <div
+          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50"
+          onClick={() => setShowQQGuide(false)}
+        >
+          <div
+            className="bg-white rounded-xl shadow-xl w-[400px] p-5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-2 mb-3">
+              <MessageCircle size={16} className="text-blue-500" />
+              <span className="font-medium text-gray-800">绑定 QQ 机器人</span>
+            </div>
+            <p className="text-sm text-gray-600 leading-relaxed mb-4">
+              通过 apikey 添加 qq 机器人与 QQ 号，绑定机器人
+            </p>
+            <div className="flex justify-end">
+              <button
+                onClick={() => setShowQQGuide(false)}
+                className="px-4 py-2 bg-blue-500 text-white rounded-lg text-sm hover:bg-blue-600"
+              >
+                知道了
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }

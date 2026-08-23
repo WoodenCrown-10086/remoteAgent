@@ -17,6 +17,7 @@ import {
 import { createReadSkillTool } from '@/agent/tools';
 import { createDispatchTool } from '@/agent/tools/dispatch';
 import { createPlanTool } from '@/agent/tools/plan';
+import { sendC2CMessage } from '@/lib/qq-bot';
 
 export const dynamic = 'force-dynamic';
 
@@ -28,6 +29,10 @@ export async function POST(req: Request) {
   // ── 从请求头读取 API key（前端设置优先，回退环境变量）──
   const apiKey = req.headers.get('x-api-key') || undefined;
   const e2bApiKey = req.headers.get('x-e2b-api-key') || undefined;
+  // QQ 机器人配置（前端设置优先，回退环境变量）
+  const qqBotAppId = req.headers.get('x-qq-bot-app-id') || undefined;
+  const qqBotAppSecret = req.headers.get('x-qq-bot-app-secret') || undefined;
+  const qqBotOpenid = req.headers.get('x-qq-bot-openid') || undefined;
 
   // ── 接口生命周期日志（供系统日志面板调试）──
   console.log(`[api] POST /api/hello 调用`, {
@@ -157,6 +162,8 @@ export async function POST(req: Request) {
   // ── 4.1 多 Agent 调度器（主 Agent 通过 dispatch 派发子任务） ──
   // 子 Agent 事件通过 onLiveEmit 拿到的 pushSubEvent 实时推入 SSE 流（不再积压等待主 Agent 事件）
   let pushSubEvent: ((ev: Record<string, unknown>) => void) | undefined;
+  // 主 Agent 最终总结（任务完成后用于 QQ 机器人通知）
+  let finalSummary = '';
   const orchestrator = new Orchestrator({
     sandbox,
     sessionId: currentSessionId,
@@ -221,7 +228,10 @@ export async function POST(req: Request) {
     agentRole: 'main',
     // 主 Agent 生命周期 hooks（验收/错误记录）
     hooks: {
-      onComplete: async ({ summary }) => {
+      onComplete: async ({ summary, rounds }) => {
+        // 最终总结 = 最后一轮完整文本（去 round 前缀，作为 QQ 通知正文）
+        const lastText = rounds[rounds.length - 1]?.text?.trim() ?? '';
+        finalSummary = lastText || summary;
         console.log(`[main-agent] 任务完成，摘要: ${summary.slice(0, 200)}`);
       },
       onError: ({ error, roundIndex }) => {
@@ -252,6 +262,22 @@ export async function POST(req: Request) {
           sandboxId: shouldKill ? undefined : sandbox?.sandboxId,
           taskStatus: taskFinal,
         }).catch((e) => console.error('[db session update]', e.message));
+
+        // 任务结束 → 通过 QQ 机器人发送通知（主动消息）
+        const qqOpenid = qqBotOpenid || process.env.QQ_BOT_OPENID;
+        if (qqOpenid) {
+          const content =
+            status === 'error'
+              ? '⚠️ [Agent 任务失败] 任务执行出错，请到 Web 端查看详情。'
+              : finalSummary || '✅ [Agent 任务完成]';
+          const qqCreds =
+            qqBotAppId && qqBotAppSecret
+              ? { appId: qqBotAppId, appSecret: qqBotAppSecret }
+              : undefined;
+          sendC2CMessage(qqOpenid, content, qqCreds).catch((e) =>
+            console.error('[qq-bot] 发送通知失败:', e.message),
+          );
+        }
       },
       // 子 Agent 事件实时推送：把 runner 的 push 函数交给 orchestrator 使用
       onLiveEmit: (push) => {

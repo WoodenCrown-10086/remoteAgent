@@ -1,33 +1,50 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Settings, X, Eye, EyeOff, Check, KeyRound, Box } from 'lucide-react';
+import { Settings, X, Eye, EyeOff, Check, KeyRound, Box, MessageCircle } from 'lucide-react';
+
+export interface QQBotConfig {
+  appId: string;
+  appSecret: string;
+  openid: string;
+}
 
 interface Props {
   apiKey: string;
   e2bApiKey: string;
-  onSave: (apiKey: string, e2bApiKey: string) => void;
+  qqBot: QQBotConfig;
+  onSave: (apiKey: string, e2bApiKey: string, qqBot: QQBotConfig) => void;
 }
 
-export default function ApiKeySettings({ apiKey, e2bApiKey, onSave }: Props) {
+export default function ApiKeySettings({ apiKey, e2bApiKey, qqBot, onSave }: Props) {
   const [open, setOpen] = useState(false);
   const [inputDeepseek, setInputDeepseek] = useState('');
   const [inputE2b, setInputE2b] = useState('');
+  const [inputQQAppId, setInputQQAppId] = useState('');
+  const [inputQQSecret, setInputQQSecret] = useState('');
+  const [inputQQOpenid, setInputQQOpenid] = useState('');
   const [show, setShow] = useState(false);
   const [saved, setSaved] = useState(false);
 
-  const hasAnyKey = !!(apiKey || e2bApiKey);
+  const hasAnyKey = !!(apiKey || e2bApiKey || qqBot.appId || qqBot.appSecret);
 
   // 打开弹窗时同步当前 key
   useEffect(() => {
     if (open) {
       setInputDeepseek(apiKey);
       setInputE2b(e2bApiKey);
+      setInputQQAppId(qqBot.appId);
+      setInputQQSecret(qqBot.appSecret);
+      setInputQQOpenid(qqBot.openid);
     }
-  }, [open, apiKey, e2bApiKey]);
+  }, [open, apiKey, e2bApiKey, qqBot]);
 
   const handleSave = () => {
-    onSave(inputDeepseek.trim(), inputE2b.trim());
+    onSave(inputDeepseek.trim(), inputE2b.trim(), {
+      appId: inputQQAppId.trim(),
+      appSecret: inputQQSecret.trim(),
+      openid: inputQQOpenid.trim(),
+    });
     setSaved(true);
     setTimeout(() => {
       setSaved(false);
@@ -38,7 +55,10 @@ export default function ApiKeySettings({ apiKey, e2bApiKey, onSave }: Props) {
   const handleClear = () => {
     setInputDeepseek('');
     setInputE2b('');
-    onSave('', '');
+    setInputQQAppId('');
+    setInputQQSecret('');
+    setInputQQOpenid('');
+    onSave('', '', { appId: '', appSecret: '', openid: '' });
   };
 
   return (
@@ -58,11 +78,11 @@ export default function ApiKeySettings({ apiKey, e2bApiKey, onSave }: Props) {
       {/* 弹窗 */}
       {open && (
         <div
-          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50"
+          className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 overflow-y-auto"
           onClick={() => setOpen(false)}
         >
           <div
-            className="bg-white rounded-xl shadow-xl w-[440px] p-5"
+            className="bg-white rounded-xl shadow-xl w-[480px] p-5 my-8"
             onClick={(e) => e.stopPropagation()}
           >
             {/* 头部 */}
@@ -117,7 +137,7 @@ export default function ApiKeySettings({ apiKey, e2bApiKey, onSave }: Props) {
                 （环境变量: <code className="bg-gray-100 px-1 rounded">E2B_API_KEY</code>）
               </span>
             </label>
-            <div className="flex items-center gap-2 border rounded-lg px-3 py-2 focus-within:border-blue-400 focus-within:ring-1 focus-within:ring-blue-400">
+            <div className="flex items-center gap-2 border rounded-lg px-3 py-2 mb-4 focus-within:border-blue-400 focus-within:ring-1 focus-within:ring-blue-400">
               <Box size={14} className="text-gray-400 shrink-0" />
               <input
                 type={show ? 'text' : 'password'}
@@ -136,6 +156,67 @@ export default function ApiKeySettings({ apiKey, e2bApiKey, onSave }: Props) {
               >
                 {show ? <EyeOff size={14} /> : <Eye size={14} />}
               </button>
+            </div>
+
+            {/* QQ 机器人（任务完成通知） */}
+            <div className="border-t border-gray-100 pt-3 mt-1">
+              <div className="flex items-center gap-2 mb-2">
+                <MessageCircle size={14} className="text-gray-500" />
+                <span className="text-xs font-medium text-gray-600">
+                  QQ 机器人通知（任务完成后推送）
+                </span>
+              </div>
+
+              <label className="block text-xs font-medium text-gray-600 mb-1">
+                QQ Bot AppID
+              </label>
+              <div className="flex items-center gap-2 border rounded-lg px-3 py-2 mb-3 focus-within:border-blue-400 focus-within:ring-1 focus-within:ring-blue-400">
+                <KeyRound size={14} className="text-gray-400 shrink-0" />
+                <input
+                  className="flex-1 text-sm outline-none bg-transparent"
+                  placeholder="1905478960"
+                  value={inputQQAppId}
+                  onChange={(e) => setInputQQAppId(e.target.value)}
+                />
+              </div>
+
+              <label className="block text-xs font-medium text-gray-600 mb-1">
+                QQ Bot AppSecret
+              </label>
+              <div className="flex items-center gap-2 border rounded-lg px-3 py-2 mb-3 focus-within:border-blue-400 focus-within:ring-1 focus-within:ring-blue-400">
+                <KeyRound size={14} className="text-gray-400 shrink-0" />
+                <input
+                  type={show ? 'text' : 'password'}
+                  className="flex-1 text-sm outline-none bg-transparent"
+                  placeholder="留空则用环境变量 QQ_BOT_APP_SECRET"
+                  value={inputQQSecret}
+                  onChange={(e) => setInputQQSecret(e.target.value)}
+                />
+                <button
+                  onClick={() => setShow((v) => !v)}
+                  className="text-gray-400 hover:text-gray-600 shrink-0"
+                  title={show ? '隐藏' : '显示'}
+                >
+                  {show ? <EyeOff size={14} /> : <Eye size={14} />}
+                </button>
+              </div>
+
+              <label className="block text-xs font-medium text-gray-600 mb-1">
+                接收者（QQ 号）
+              </label>
+              <div className="flex items-center gap-2 border rounded-lg px-3 py-2 focus-within:border-blue-400 focus-within:ring-1 focus-within:ring-blue-400">
+                <MessageCircle size={14} className="text-gray-400 shrink-0" />
+                <input
+                  className="flex-1 text-sm outline-none bg-transparent"
+                  placeholder="2365195094"
+                  value={inputQQOpenid}
+                  onChange={(e) => setInputQQOpenid(e.target.value)}
+                />
+              </div>
+              <p className="text-[11px] text-amber-600 mt-1 leading-relaxed">
+                注意：QQ 机器人发主动消息实际需要 openid（私聊机器人后从事件回调获取），
+                纯 QQ 号无法直接用于发送。
+              </p>
             </div>
 
             {/* 操作按钮 */}
