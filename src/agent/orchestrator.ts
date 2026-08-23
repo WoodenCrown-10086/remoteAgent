@@ -37,6 +37,16 @@ export interface AgentReport {
   gateReason?: string;
 }
 
+/** 多 planner 交叉评分选优的结果 */
+export interface PlanConsensusResult {
+  /** 平均分最高的最终方案 */
+  plan: string;
+  /** 该方案的平均分 */
+  score: number;
+  /** 全部候选方案及其平均分 */
+  candidates: Array<{ id: string; plan: string; score: number }>;
+}
+
 export interface OrchestratorOpts {
   sandbox: Sandbox;
   sessionId: string;
@@ -132,6 +142,71 @@ export class Orchestrator {
       };
     });
     return this.runGate(reports);
+  }
+
+  /**
+   * 首次规划：并行派 3 个 planner 独立出方案 → 交叉评分 → 选平均分最高的方案。
+   * 后续 loop 里的规划不调用此方法，只派 1 个 planner（复用已选方案微调）。
+   */
+  async planWithConsensus(task: string): Promise<PlanConsensusResult> {
+    // 1. 3 个 planner 并行独立生成候选方案
+    const gen = await this.dispatchBatch(
+      'planner',
+      [
+        { id: 'planner-1', task: buildPlannerGenTask(task) },
+        { id: 'planner-2', task: buildPlannerGenTask(task) },
+        { id: 'planner-3', task: buildPlannerGenTask(task) },
+      ],
+      [],
+    );
+
+    const candidates = gen.reports
+      .map((r) => ({ id: r.taskId, plan: (r.report || r.summary || '').trim() }))
+      .filter((c) => c.plan.length > 0);
+
+    if (candidates.length === 0) {
+      return { plan: '', score: 0, candidates: [] };
+    }
+    if (candidates.length === 1) {
+      return {
+        plan: candidates[0].plan,
+        score: 0,
+        candidates: [{ ...candidates[0], score: 0 }],
+      };
+    }
+
+    // 2. 交叉评分：每个候选由「其余候选的作者视角」打分（各候选互评）
+    const scoreMap = new Map<string, number[]>();
+    for (const c of candidates) scoreMap.set(c.id, []);
+
+    const scoreTasks = candidates.map((_, i) => {
+      const others = candidates.filter((__, j) => j !== i);
+      return { id: `score-${i}`, task: buildScoringTask(others) };
+    });
+
+    const scoreReports = await this.dispatchBatch('planner', scoreTasks, []);
+
+    // 3. 解析评分结果
+    for (const r of scoreReports.reports) {
+      const text = r.report || r.summary || '';
+      for (const [id, s] of parseScores(text)) {
+        const list = scoreMap.get(id);
+        if (list) list.push(s);
+      }
+    }
+
+    // 4. 计算每个候选的平均分，选最高
+    const scored = candidates.map((c) => {
+      const list = scoreMap.get(c.id) || [];
+      const score = list.length
+        ? list.reduce((a, b) => a + b, 0) / list.length
+        : 0;
+      return { id: c.id, plan: c.plan, score };
+    });
+    scored.sort((a, b) => b.score - a.score);
+    const best = scored[0];
+
+    return { plan: best.plan, score: best.score, candidates: scored };
   }
 
   /** 门禁：子 Agent 准出标记 + 外部验证脚本 */
@@ -388,4 +463,33 @@ export class Orchestrator {
         .join('\n'),
     };
   }
+}
+
+// ── 多 planner 选优辅助 ──
+
+/** 独立规划任务：要求 planner 完全独立产出，不参考他人 */
+function buildPlannerGenTask(task: string): string {
+  return `你是独立的规划者。请针对以下需求独立给出一个完整、可执行的实施计划，不要参考或猜测他人的方案，完全基于自己的判断。\n\n需求：\n${task}\n\n按规划者输出格式给出计划（任务标题、子任务列表、执行顺序、关键决策点）。`;
+}
+
+/** 交叉评分任务：让一个「作者视角」给其余候选方案打分 */
+function buildScoringTask(others: Array<{ id: string; plan: string }>): string {
+  const blocks = others.map((o) => `候选 ${o.id} 的方案：\n${o.plan}`).join('\n\n');
+  const fmt = others.map((o) => `${o.id}: <分数>`).join('\n');
+  return `你是规划评审员。请给下面每个候选规划方案分别打分（0-10 的整数，10 为最优），从完整性、可行性、步骤合理性三个维度综合评估。\n\n${blocks}\n\n严格按以下格式输出（每个候选一行，只输出「候选id: 分数」）：\n${fmt}`;
+}
+
+/** 从评分文本解析「id: 分数」列表 */
+function parseScores(text: string): Array<[string, number]> {
+  const out: Array<[string, number]> = [];
+  const re = /([a-zA-Z0-9_-]+)\s*[:：]\s*(\d+(?:\.\d+)?)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const id = m[1];
+    const score = parseFloat(m[2]);
+    if (!Number.isNaN(score) && score >= 0 && score <= 10) {
+      out.push([id, score]);
+    }
+  }
+  return out;
 }

@@ -39,7 +39,7 @@ export const ROLE_POOL: Record<AgentRoleName, AgentRole> = {
     tools: [createReadSkillTool],
     sandboxAccess: 'read',
     maxSteps: 15,
-    parallelLimit: 1, // planner 串行唯一
+    parallelLimit: 3, // 首次规划并行派发 3 个 planner 独立出方案
   },
   coder: {
     role: 'coder',

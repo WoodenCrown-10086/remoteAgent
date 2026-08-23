@@ -16,6 +16,7 @@ import {
 } from '@/db/db';
 import { createReadSkillTool } from '@/agent/tools';
 import { createDispatchTool } from '@/agent/tools/dispatch';
+import { createPlanTool } from '@/agent/tools/plan';
 
 export const dynamic = 'force-dynamic';
 
@@ -90,6 +91,20 @@ export async function POST(req: Request) {
   console.log(
     `[context] session=${currentSessionId.slice(0, 8)} messages=${ctx.messages.length} tokens=${ctx.totalTokens} compressed=${ctx.compressed}`,
   );
+
+  // ── 2.8 写入用户消息（提前到沙箱创建前） ──
+  // 沙箱创建（e2b API）可能耗时数秒；若用户在此期间刷新页面，需保证用户消息已落库，
+  // 否则刷新后「本轮输入」会丢失，直到后台任务产出新消息才被补全。
+  // 用户消息不依赖沙箱，sandboxId 先用绑定值（未绑定时为 null）。
+  const sequence = await getNextSequence(currentSessionId);
+  await insertMessage({
+    sessionId: currentSessionId,
+    role: 'user',
+    type: 'user',
+    content: prompt,
+    sequence,
+    sandboxId: boundSandboxId,
+  });
 
   // ── 3. 沙箱（用会话绑定值，前端传入仅兜底） ──
   let sandbox: Sandbox | null = null;
@@ -168,10 +183,14 @@ export async function POST(req: Request) {
   });
   // tools 字面量类型无 dispatch 属性，沿用 memory_search 的 any 断言注入方式
   (tools as any).dispatch = createDispatchTool(
-    async (role, task, dependsOn, taskId) => {
-      // 单任务批量：同步等待子 Agent 完成 + 门禁
-      return orchestrator.dispatchBatch(role, [{ id: taskId, task }], dependsOn);
+    async ({ role, tasks, dependsOn }) => {
+      // 批量派发：同步等待全部子 Agent 完成 + 门禁
+      return orchestrator.dispatchBatch(role, tasks, dependsOn);
     },
+  );
+  // 首次规划：3 planner 并行 + 交叉评分 + 选平均最高
+  (tools as any).plan = createPlanTool(
+    (task) => orchestrator.planWithConsensus(task),
   );
 
   // 上下文被压缩时注入记忆检索工具（回忆早期历史）
@@ -180,17 +199,6 @@ export async function POST(req: Request) {
       contextManager.search.bind(contextManager),
     );
   }
-
-  // ── 5. 写入用户消息 ──
-  const sequence = await getNextSequence(currentSessionId);
-  await insertMessage({
-    sessionId: currentSessionId,
-    role: 'user',
-    type: 'user',
-    content: prompt,
-    sequence,
-    sandboxId: sandbox.sandboxId,
-  });
 
   // ── 6. 运行 Agent（后台任务模式：断线不中断，状态写 DB） ──
   // 标记任务开始

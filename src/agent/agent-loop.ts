@@ -222,6 +222,9 @@ export async function runAgentLoop(params: AgentLoopParams): Promise<void> {
   await hooks?.onComplete?.({
     rounds,
     messages,
-    summary: rounds.map((r) => `round ${r.roundIndex}: ${r.text.slice(0, 100)}`).join('\n'),
+    // 保留完整轮文本：orchestrator 的多 planner 交叉评分需要完整方案内容
+    //（planWithConsensus 从 report 里取完整 plan 做互评）。主 Agent 本身不读这些完整内容做决策，
+    // 只通过 plan / dispatch 的结构化返回值拿结果。
+    summary: rounds.map((r) => `round ${r.roundIndex}: ${r.text}`).join('\n'),
   });
 }
