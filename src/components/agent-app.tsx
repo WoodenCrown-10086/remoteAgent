@@ -229,7 +229,7 @@ export default function AgentApp() {
   const [qqBot, setQqBot] = useState<QQBotConfig>({
     appId: '',
     appSecret: '',
-    openid: '2365195094', // 默认接收者 QQ 号
+    openid: '', // 接收者 openid 默认空，由用户自己绑定获取
   });
   const [showQQGuide, setShowQQGuide] = useState(false);
 
@@ -247,7 +247,7 @@ export default function AgentApp() {
       setQqBot({
         appId: savedQQAppId || '',
         appSecret: savedQQSecret || '',
-        openid: savedQQOpenid || '2365195094',
+        openid: savedQQOpenid ?? '',
       });
 
       // 未配置 QQ 机器人（缺 appId/appSecret）→ 弹可关闭提醒

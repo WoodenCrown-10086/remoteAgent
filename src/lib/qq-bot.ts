@@ -4,7 +4,7 @@
 
 const QQ_BOT_BASE = 'https://api.bot.qq.com';
 
-interface QQBotCreds {
+export interface QQBotCreds {
   appId?: string;
   appSecret?: string;
 }
@@ -18,7 +18,7 @@ interface CachedToken {
 const tokenCache = new Map<string, CachedToken>();
 
 /** 获取机器人 access_token（优先传入凭据，回退环境变量；按 appId 缓存，7200s 有效，提前 60s 刷新） */
-async function getAccessToken(creds?: QQBotCreds): Promise<string> {
+export async function getAccessToken(creds?: QQBotCreds): Promise<string> {
   const appId = creds?.appId || process.env.QQ_BOT_APP_ID;
   const appSecret = creds?.appSecret || process.env.QQ_BOT_APP_SECRET;
   if (!appId || !appSecret) {

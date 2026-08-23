@@ -26,9 +26,14 @@ function findUserOpenid(obj: unknown): string | undefined {
  * - op=0 ：事件推送（C2C_MESSAGE_CREATE 等）→ 验签 + 提取 user_openid 打到日志
  */
 export async function POST(req: Request) {
-  const secret = process.env.QQ_BOT_APP_SECRET;
+  // 回调验签用的密钥是「签名密钥 / Bot Secret」，与换 token 的 AppSecret 是两个不同值。
+  // 优先读 QQ_BOT_SIGN_SECRET（签名密钥），未配置时回退 QQ_BOT_APP_SECRET。
+  const secret = process.env.QQ_BOT_SIGN_SECRET || process.env.QQ_BOT_APP_SECRET;
   if (!secret) {
-    return Response.json({ error: 'QQ_BOT_APP_SECRET 未配置' }, { status: 500 });
+    return Response.json(
+      { error: 'QQ_BOT_SIGN_SECRET / QQ_BOT_APP_SECRET 未配置' },
+      { status: 500 },
+    );
   }
 
   const rawBody = await req.text();
